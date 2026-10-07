@@ -1,3 +1,4 @@
+import { useGahStore } from '../store/gahStore.js';
 import { coordinatorWebSocketProtocols, TOKEN_CHANGED_EVENT } from '../api/coordinatorToken.js';
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
 import { useUiStore } from '../store/uiStore.js';
@@ -227,6 +228,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           setMessages(prev => [...prev.slice(-(MAX_INBOX_MESSAGES - 1)), entry]);
 
           switch (message.type) {
+            case 'workers.snapshot': {
+              const current = useGahStore.getState().status;
+              if (current.data?.profile.profile === message.profile) useGahStore.setState({ status: { ...current, data: { ...current.data, running_workers: message.workers } } });
+              break;
+            }
             case 'activity.replay': {
               setActivitySyncedAt(Date.now());
               const fresh = message.events.filter((item) => !activityIdsRef.current.has(item.id));

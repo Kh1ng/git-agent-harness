@@ -1,5 +1,8 @@
+import React from 'react';
+import { MockStoreProvider } from '../../src/test-utils/MockStoreProvider.js';
+import { RunningWorkersRoster } from '../../src/components/RunningWorkersRoster.js';
 import { expect, test } from '@playwright/experimental-ct-react';
-import type { ControllerActivity } from '@git-agent-harness/contracts';
+import type { ControllerActivity, StatusSnapshot, RunningWorker } from '@git-agent-harness/contracts';
 import { ControllerActivityCard } from '../../src/components/ControllerActivityCard.js';
 
 const terminalRuns: ControllerActivity[] = [
@@ -51,13 +54,15 @@ test('keeps terminal controller history collapsed when no work is running', asyn
   await expect(component.getByText(terminalRuns[0].action, { exact: true })).toBeVisible();
 });
 
-test('opens a running dispatch to show its full metadata', async ({ mount }) => {
-  const component = await mount(<ControllerActivityCard activity={[running]} />);
-
-  await expect(component.getByText('Improve #1112', { exact: true })).toBeVisible();
-  await expect(component.getByText(running.run_id, { exact: true })).toBeHidden();
-
-  await component.getByText('Improve #1112', { exact: true }).click();
-  await expect(component.getByText(running.run_id, { exact: true })).toBeVisible();
-  await expect(component.getByText('gah', { exact: true })).toBeVisible();
+test('running count comes from the roster even when controller events disagree', async ({ mount }) => {
+  const worker: RunningWorker = { work_id: '#1112', run_id: 'run', mode: 'improve', backend: 'codex', runner: 'codex', backend_instance: 'codex-work', requested_model: 'requested', model: 'routed', actual_model: null, node_id: 'node', branch: 'gah/1112', started_at: running.started_at, last_activity_at: running.started_at, attempt: 2, stale_after_seconds: 900, state: 'stale' };
+  const workers = [worker, { ...worker, run_id: 'second', state: 'running' as const }];
+  const status = { running_workers: workers } as StatusSnapshot;
+  const component = await mount(<MockStoreProvider statusData={status}><ControllerActivityCard activity={[running]} /><RunningWorkersRoster workers={workers} /></MockStoreProvider>);
+  await expect(component.getByText('2 running', { exact: true })).toBeVisible();
+  await expect(component.getByTestId('worker-row')).toHaveCount(2);
+  await expect(component.getByText('View worker roster')).toHaveAttribute('href', '#running-workers');
+  await component.update(<MockStoreProvider statusData={{ running_workers: [] } as unknown as StatusSnapshot}><ControllerActivityCard activity={[running]} /><RunningWorkersRoster workers={[]} /></MockStoreProvider>);
+  await expect(component.getByText('Idle', { exact: true })).toBeVisible();
+  await expect(component.getByTestId('worker-row')).toHaveCount(0);
 });

@@ -13,6 +13,14 @@ const instance = (id: string, backend: string, extra: Record<string, unknown> = 
 
 // Routes that fetch from the fixture server must not outlive the test.
 test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+const worker = (run_id: string, work_id: string, backend = 'codex', model = 'gpt-6-sol', started_at = new Date(Date.now() - 120_000).toISOString()) => ({ run_id, work_id, backend, runner: backend, backend_instance: backend, model, requested_model: model, actual_model: null, mode: 'improve', node_id: 'fixture-node', branch: 'gah/fixture', started_at, last_activity_at: started_at, attempt: 1, stale_after_seconds: 900, state: 'running' });
+async function roster(page: import('@playwright/test').Page, workers: ReturnType<typeof worker>[]) {
+  await page.route('**/api/status**', async route => {
+    const snapshot = await (await route.fetch()).json();
+    await route.fulfill({ json: { ...snapshot, running_workers: workers } });
+  });
+}
+
 
 test('rows derive their state from sessions, runs, claims, instance health and quota', () => {
   const now = Date.parse('2026-10-04T12:00:00Z');
@@ -110,6 +118,7 @@ test('Overview shows each agent account with its job, elapsed time, claim and fi
   ] }));
   await page.route('**/api/status**', async (route) => {
     const snapshot = await (await route.fetch()).json();
+    snapshot.running_workers = [{ ...worker('s1', '#946', 'claude', 'opus', startedAt), backend_instance: 'claude-main' }];
     snapshot.active_claims = [{ work_id: '#946', pid: 1, scope: 'improve', hostname: 'box', claimed_at: startedAt, age_seconds: 290 }];
     await route.fulfill({ json: snapshot });
   });
@@ -174,6 +183,7 @@ test('Non Factory Agents lists device CLIs outside the factory and dashboard cha
 
 test('Watch live opens a read-only view of a running job in the left sidebar and follows its output', async ({ page }) => {
   const RUN = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
+  await roster(page, [worker(RUN, '#1381')]);
   let polls = 0;
   await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: [
     { run_id: RUN, profile: 'fixture', work_id: '#1381', started_at: new Date(Date.now() - 120_000).toISOString(), finished_at: null, action: 'dispatch_ticket: 1381', status: 'running', outcome: null }
@@ -194,9 +204,9 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
     return route.fulfill({ json: { found: true, attempt: 1, next: 200, truncated: false, events: [] } });
   });
   await page.goto('/?page=overview&profile=fixture');
-  const live = page.getByRole('region', { name: 'Factory Agents Status' });
-  // The running job is named by the factory's agent process (its account and model), not "controller".
-  await expect(live).toContainText('Mock-account Gpt-6-sol');
+  const live = page.getByRole('region', { name: 'Running workers' });
+  // The routed backend and model come from the worker observation.
+  await expect(live).toContainText('Model: gpt-6-sol');
   await live.getByRole('button', { name: 'Watch #1381 live' }).click();
   const view = page.getByRole('complementary', { name: 'Running agents' });
   await expect(view.getByRole('heading', { name: /gpt-6-sol on #1381$/ })).toBeVisible();
@@ -231,6 +241,7 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
 
 test('the live view waits for a slow read before the next, and names the log its offset belongs to', async ({ page }) => {
   const RUN = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
+  await roster(page, [worker(RUN, '#1381')]);
   await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: [
     { run_id: RUN, profile: 'fixture', work_id: '#1381', started_at: new Date(Date.now() - 120_000).toISOString(), finished_at: null, action: 'dispatch_ticket: 1381', status: 'running', outcome: null }
   ] }));
@@ -246,7 +257,7 @@ test('the live view waits for a slow read before the next, and names the log its
       events: first ? [{ kind: 'message', text: 'Read once.' }] : [] } });
   });
   await page.goto('/?page=overview&profile=fixture');
-  await page.getByRole('region', { name: 'Factory Agents Status' }).getByRole('button', { name: 'Watch #1381 live' }).click();
+  await page.getByRole('region', { name: 'Running workers' }).getByRole('button', { name: 'Watch #1381 live' }).click();
   const view = page.getByRole('complementary', { name: 'Running agents' });
   await expect(view).toContainText('Read once.');
   await expect.poll(() => logs.length, { timeout: 8000 }).toBeGreaterThan(2);
@@ -260,6 +271,7 @@ test('the live view waits for a slow read before the next, and names the log its
 test('the live view lists every running factory agent and switches between them', async ({ page }) => {
   const A = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
   const B = 'ac5f2583-b6cd-4e10-9e89-8c78cf65ba3c';
+  await roster(page, [worker(A, '#1381'), worker(B, '#1380', 'claude', 'sonnet')]);
   const run = (run_id: string, work_id: string, ago: number) => ({ run_id, profile: 'fixture', work_id, started_at: new Date(Date.now() - ago).toISOString(), finished_at: null, action: `dispatch_ticket: ${work_id}`, status: 'running', outcome: null });
   await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: [run(A, '#1381', 120_000), run(B, '#1380', 100_000)] }));
   await page.route('**/api/work/**', (route) => route.fulfill({ json: [] }));
@@ -273,7 +285,7 @@ test('the live view lists every running factory agent and switches between them'
     return route.fulfill({ json: { found: true, attempt: 1, next: 10, truncated: false, events: Number(url.searchParams.get('after')) === 0 ? [{ kind: 'message', text: first ? 'Output of the first job.' : 'Output of the second job.' }] : [] } });
   });
   await page.goto('/?page=overview&profile=fixture');
-  await page.getByRole('region', { name: 'Factory Agents Status' }).getByRole('button', { name: 'Watch #1381 live' }).click();
+  await page.getByRole('region', { name: 'Running workers' }).getByRole('button', { name: 'Watch #1381 live' }).click();
   const view = page.getByRole('complementary', { name: 'Running agents' });
   await expect(view).toContainText('Output of the first job.');
   const agents = view.getByRole('navigation', { name: 'Running factory agents' }).getByRole('button');
@@ -288,6 +300,10 @@ test('the live view lists every running factory agent and switches between them'
 test('the Running agents icon opens the first running agent, or says nothing is running', async ({ page }) => {
   const RUN = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
   let running = false;
+  await page.route('**/api/status**', async route => {
+    const snapshot = await (await route.fetch()).json();
+    await route.fulfill({ json: { ...snapshot, running_workers: running ? [worker(RUN, '#1381')] : [] } });
+  });
   await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: running ? [
     { run_id: RUN, profile: 'fixture', work_id: '#1381', started_at: new Date(Date.now() - 60_000).toISOString(), finished_at: null, action: 'dispatch_ticket: 1381', status: 'running', outcome: null }
   ] : [] }));
@@ -299,18 +315,18 @@ test('the Running agents icon opens the first running agent, or says nothing is 
   const icon = page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Running agents', exact: true });
   await icon.click();
   const panel = page.getByRole('complementary', { name: 'Running agents' });
-  await expect(panel).toContainText('No factory agent is running');
+  await expect(panel).toContainText('No running workers reported.');
   await icon.click();
   running = true;
   await page.reload();
   await icon.click();
   // The panel opens on the list of running agents; picking one shows its output.
-  const list = panel.getByRole('list', { name: 'Running factory agents' }).getByRole('listitem');
+  const list = panel.getByRole('list', { name: 'Worker roster' }).getByRole('listitem');
   await expect(list).toHaveCount(1);
-  await expect(list.first()).toContainText(/gpt-6-sol on #1381/);
-  await expect(list.first()).toContainText(/running for \d+m? ?\d*s?/);
+  await expect(list.first()).toContainText('Model: gpt-6-sol');
+  await expect(list.first()).toContainText(/Elapsed: \d+m? ?\d*s?/);
   await expect(panel).not.toContainText('Tracing the loop.');
-  await list.first().getByRole('button').click();
+  await list.first().getByRole('button', { name: 'Watch #1381 live' }).click();
   await expect(panel).toContainText('Tracing the loop.');
   await expect(panel.getByRole('navigation', { name: 'Running factory agents' }).getByRole('button')).toHaveCount(1);
   // View only: no message box, no pause or kill.
@@ -318,7 +334,7 @@ test('the Running agents icon opens the first running agent, or says nothing is 
   await expect(panel.getByRole('button', { name: /kill|pause|stop|send/i })).toHaveCount(0);
   // Back returns to the list.
   await panel.getByRole('button', { name: 'Close live view' }).click();
-  await expect(panel.getByRole('heading', { name: 'Running agents', exact: true })).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Running workers (1)', exact: true })).toBeVisible();
   await expect(list).toHaveCount(1);
 });
 
