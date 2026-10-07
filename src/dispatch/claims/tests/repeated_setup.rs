@@ -46,6 +46,20 @@ fn signatures_normalize_numbers_paths_and_whitespace() {
         setup_failure_signature(&disk),
         setup_failure_signature(&path)
     );
+    assert_eq!(
+        setup_failure_signature(&failure("(/tmp/a): 9 GiB")),
+        setup_failure_signature(&failure("(/tmp/b): 8 GiB"))
+    );
+    for (summary, expected) in [
+        ("(/tmp/a): 9 GiB", "(<path>): # GiB"),
+        ("'/home/x/y.rs',", "'<path>',"),
+        ("/tmp", "<path>"),
+        ("backend/model", "backend/model"),
+        ("and/or 123", "and/or #"),
+        ("a1/b2 ./tmp _/tmp -/tmp", "a#/b# ./tmp _/tmp -/tmp"),
+    ] {
+        assert_eq!(setup_failure_signature(&failure(summary)).2, expected);
+    }
 }
 
 #[test]

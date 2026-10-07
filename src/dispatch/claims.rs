@@ -353,12 +353,24 @@ fn setup_failure_signature(entry: &LedgerEntry) -> (Option<String>, Option<Strin
     let normalized = summary
         .split_whitespace()
         .map(|token| {
-            if token.starts_with('/') {
-                return "<path>".to_string();
-            }
+            let is_word_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-');
             let mut result = String::new();
             let mut in_digits = false;
-            for ch in token.chars() {
+            let mut previous = None;
+            let mut chars = token.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '/' && !previous.is_some_and(is_word_char) {
+                    result.push_str("<path>");
+                    previous = Some(ch);
+                    while chars
+                        .peek()
+                        .is_some_and(|&next| is_word_char(next) || next == '/')
+                    {
+                        previous = chars.next();
+                    }
+                    in_digits = false;
+                    continue;
+                }
                 if ch.is_ascii_digit() {
                     if !in_digits {
                         result.push('#');
@@ -368,6 +380,7 @@ fn setup_failure_signature(entry: &LedgerEntry) -> (Option<String>, Option<Strin
                     result.push(ch);
                     in_digits = false;
                 }
+                previous = Some(ch);
             }
             result
         })
