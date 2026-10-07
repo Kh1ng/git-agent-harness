@@ -1,5 +1,8 @@
 use super::*;
 
+mod issue_budget;
+pub use issue_budget::IssueBudget;
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct CandidateConfig {
     pub backend: String,
@@ -177,6 +180,10 @@ pub struct RoutingPolicy {
     /// compatibility evidence for a human. Unset means on (#1405).
     #[serde(default)]
     pub hold_contract_changes_for_human_review: Option<bool>,
+    /// Per-issue effort budget (attempts, elapsed time, manager rounds).
+    /// Unset axes are unlimited; see `IssueBudget`.
+    #[serde(default, skip_serializing_if = "IssueBudget::is_default")]
+    pub issue_budget: IssueBudget,
 }
 
 impl RoutingPolicy {
@@ -616,6 +623,7 @@ pub(super) fn merge_routing_policy(
     repo.hold_contract_changes_for_human_review = repo
         .hold_contract_changes_for_human_review
         .or(canonical.hold_contract_changes_for_human_review);
+    repo.issue_budget = repo.issue_budget.merged_with(canonical.issue_budget);
     repo
 }
 
