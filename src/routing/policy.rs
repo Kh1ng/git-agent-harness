@@ -630,21 +630,13 @@ pub(super) fn route_candidates(
     raw: &[crate::config::CandidateConfig],
 ) -> Vec<RouteCandidate> {
     let now = time::OffsetDateTime::now_utc();
-    // Issue #761: an operator opting a candidate into quota-aware pacing
-    // (included_in_quota: true) previously had no way to get live
-    // quota_usage_percent/quota_days_remaining short of hand-typing static
-    // numbers into config.toml that immediately go stale -- quota_pace()
-    // silently no-ops (PaceBand::Normal) on missing data, so this candidate
-    // never actually got paced. Loaded lazily: only candidates that are
-    // opted in AND missing an explicit config value ever touch the store.
+    // Load live observations lazily for candidates opted into quota pacing.
     let mut quota_observations: Option<Vec<crate::quota_store::QuotaObservationRecord>> = None;
     raw.iter()
         .enumerate()
         .map(|(idx, c)| {
             let identity = routing.execution_identity_for_candidate(c);
-            let (live_usage_percent, live_days_remaining) = if c.included_in_quota
-                && (c.quota_usage_percent.is_none() || c.quota_days_remaining.is_none())
-            {
+            let (live_usage_percent, live_days_remaining) = if c.included_in_quota {
                 let observations = quota_observations
                     .get_or_insert_with(crate::quota_store::load_account_observations);
                 live_quota_pacing_inputs(observations, &identity, now)
@@ -656,10 +648,8 @@ pub(super) fn route_candidates(
                 priority: c.priority,
                 included_in_quota: c.included_in_quota,
                 marginal_cost_usd: c.marginal_cost_usd,
-                // An explicit config value is an operator override and
-                // always wins; live data only fills a genuine gap.
-                quota_usage_percent: c.quota_usage_percent.or(live_usage_percent),
-                quota_days_remaining: c.quota_days_remaining.or(live_days_remaining),
+                quota_usage_percent: live_usage_percent,
+                quota_days_remaining: live_days_remaining,
                 requires_approval: c.requires_approval,
                 original_order: idx,
             }

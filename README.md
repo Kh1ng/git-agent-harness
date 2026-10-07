@@ -294,6 +294,41 @@ for normal review routing: use the ordered `review_candidates` pool and
 a weak reviewer `NEEDS_FIX` consumes the same post-review repair budget as
 any other `NEEDS_FIX` verdict.
 
+### Per-issue budget
+
+`routing.issue_budget` bounds the total automatic effort one issue may
+consume, on three independent axes. An axis left unset is unlimited, and a
+profile without the section keeps today's behaviour.
+
+```toml
+[profiles.my-repo.routing.issue_budget]
+# Worker attempts, counted across every dispatch of the issue, including
+# ones that failed in setup (preflight, backend launch, environment).
+max_attempts = 4
+# Summed recorded worker and review time.
+max_elapsed_minutes = 90
+# Review verdicts recorded for the issue.
+max_manager_rounds = 3
+# The last attempts of max_attempts are kept for an escalation to a
+# stronger backend/model; a same-tier retry is refused once only the
+# reserve is left. Defaults to 1.
+escalation_reserve_attempts = 1
+```
+
+Usage is projected from the ledger on every status snapshot, under any
+alias of the work id (`#42` and `TICKET-42`). Dispatches that never
+launched a backend (capacity deferrals, lost claims) and reviews without a
+verdict do not count. A spent budget holds the issue as a ticket-scoped
+`retry_budget_exhausted` work item: the loop refuses to dispatch, retry or
+escalate it while unrelated work keeps flowing. When the elapsed-time or
+manager-round axis is spent, review and repair of the issue's open MR stop
+too (a green, approved MR still merges); a spent attempts axis only refuses
+new dispatches, so the MR the last attempt produced still gets its review.
+With `max_attempts = 2` and the default reserve of 1, one setup failure
+already holds the issue, because a same-tier retry may not use the reserve.
+`gah status` lists each issue's remaining budget under "Issue budgets", and
+`gah clear-attempts` releases the hold by resetting the counters.
+
 ### Restricting a job kind to named models
 
 `allowed_models` is a strict, per-profile allow-list keyed by job kind
@@ -543,12 +578,59 @@ labels conflict. Explicit dispatch of a trusted but held or unlabelled issue
 requires the visible `--issue-intake-override` flag; it never bypasses author
 trust.
 
+An issue a manager owns is **managed**: it carries the `managed` (or
+`gah:managed`) label, or, on a profile that keeps issue claims local, it is
+assigned to a login other than the one the loop acts as. Recurring discovery
+leaves it alone and `gah status` lists it under the intake rejections with the
+reason code `managed`; the dashboard's Assign button and `POST /api/dispatch`
+refuse to start a fix or improve job on it. Explicit
+`gah dispatch --target "#<n>"` still runs, since that is how the manager runs
+the issue it holds. With `issue_claim.mode = "github_assignee"` the assignee is
+a claim instead (next section), so only the label marks an issue managed.
+
 For backward compatibility, a GitHub profile without the new human list still
 uses `github_issue_author_allowlist`; if neither list is configured, only the
 repository owner is trusted. That compatibility field never grants GitLab
 trust. GitLab project access-token users are recognized from the project-scoped
 `project_<project-id>_bot_*` username and must still be listed exactly in
 `trusted_issue_bot_authors`. Explicit empty lists deny that author class.
+
+### Issue claims across loops
+
+When several loops work one GitHub repository under different logins, let each
+claim an issue on GitHub before it starts work:
+
+```toml
+[profiles.my_profile.publishing.issue_claim]
+mode = "github_assignee"   # default "local": nothing is written to GitHub
+ttl_minutes = 60
+verify_seconds = 60
+priority_logins = ["first-choice-login"]
+```
+
+A dispatch that has been granted a backend and node slot assigns the login
+`gh` is signed in as, posts a claim comment, waits `verify_seconds`, and
+re-reads the issue. A dispatch refused a slot claims nothing. If another loop
+claimed it at the same moment, the first login in `priority_logins` keeps it,
+otherwise the earliest claim comment; the other loop removes its own assignee
+and moves on. Intake leaves alone every issue that another login holds,
+including one a person assigned by hand, which is held until that assignee is
+removed.
+
+A claim is a lease of `ttl_minutes`. While the dispatch runs it renews the
+lease every third of that by editing its claim comment (an edit notifies
+nobody). A loop that crashes or stops stops renewing, and `ttl_minutes` after
+the last renewal another loop may remove the stale assignee and claim the
+issue, unless an open pull request for the issue exists. A dispatch that finds
+its lease taken over stops before it publishes: it keeps its work on a local
+WIP commit and the loop reports the issue as skipped.
+
+Every loop sharing the repository must use the same `ttl_minutes` and
+`priority_logins`, because each one decides a contested claim from its own
+copy. The mode is independent of `issue_intake_mode`: it adds no label
+requirement and removes none. It applies whenever an issue is dispatched for
+implementation, by the loop or by hand, and not to planning decomposition or
+pull request review.
 
 ### Generated-artifact publication guard
 
@@ -731,9 +813,11 @@ dev runs; `--prod` also switches policy enforcement to `git-push-prod`.
 ## Manager Agent
 
 `docs/gah-manager-skill.md` is the system prompt / skill file for a manager
-agent that orchestrates GAH: decomposes work via PM mode, dispatches workers,
-tracks state in the target repo's `docs/MANAGER_MEMORY.md`, and escalates
-failed tickets to stronger models.
+agent that owns issues end to end: it marks an issue `managed`, writes a job
+file (allowed files, expected result, verification checks, stop condition),
+runs one bounded worker, gates the result itself, opens the draft pull
+request, and gets an independent review before anything merges. Budgets are
+fixed per issue and a repeated failure is a hold, not a retry.
 
 ### Project skill bindings
 

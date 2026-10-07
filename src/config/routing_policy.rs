@@ -1,5 +1,8 @@
 use super::*;
 
+mod issue_budget;
+pub use issue_budget::IssueBudget;
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct CandidateConfig {
     pub backend: String,
@@ -16,10 +19,21 @@ pub struct CandidateConfig {
     pub included_in_quota: bool,
     #[serde(default)]
     pub marginal_cost_usd: Option<f64>,
-    #[serde(default)]
-    pub quota_usage_percent: Option<f64>,
-    #[serde(default)]
-    pub quota_days_remaining: Option<f64>,
+    // Deserialize-only tombstones: reject stale overrides and never save them.
+    #[serde(
+        default,
+        rename = "quota_usage_percent",
+        skip_serializing,
+        deserialize_with = "reject_removed_usage"
+    )]
+    pub removed_usage: (),
+    #[serde(
+        default,
+        rename = "quota_days_remaining",
+        skip_serializing,
+        deserialize_with = "reject_removed_days"
+    )]
+    pub removed_days: (),
     /// Paid/API-backed candidates can remain configured as terminal
     /// fallbacks without ever being selected autonomously. An operator must
     /// grant a work-item-scoped route approval before routing may select one.
@@ -166,6 +180,10 @@ pub struct RoutingPolicy {
     /// compatibility evidence for a human. Unset means on (#1405).
     #[serde(default)]
     pub hold_contract_changes_for_human_review: Option<bool>,
+    /// Per-issue effort budget (attempts, elapsed time, manager rounds).
+    /// Unset axes are unlimited; see `IssueBudget`.
+    #[serde(default, skip_serializing_if = "IssueBudget::is_default")]
+    pub issue_budget: IssueBudget,
 }
 
 impl RoutingPolicy {
@@ -605,5 +623,48 @@ pub(super) fn merge_routing_policy(
     repo.hold_contract_changes_for_human_review = repo
         .hold_contract_changes_for_human_review
         .or(canonical.hold_contract_changes_for_human_review);
+    repo.issue_budget = repo.issue_budget.merged_with(canonical.issue_budget);
     repo
+}
+
+fn reject_removed_usage<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom("quota_usage_percent was removed because quota pacing now uses live readings only; delete it from the routing candidate"))
+}
+
+fn reject_removed_days<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom("quota_days_remaining was removed because quota pacing now uses live readings only; delete it from the routing candidate"))
+}
+
+#[cfg(test)]
+mod removed_quota_tests {
+    use super::*;
+
+    fn rejects(key: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("[[defaults.routing.pm_candidates]]\nbackend = \"codex\"\n{key} = 50\n"),
+        )
+        .unwrap();
+        let error = load(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("{key} was removed because quota pacing now uses live readings only; delete it from the routing candidate")));
+    }
+
+    #[test]
+    fn rejects_quota_usage_percent() {
+        rejects("quota_usage_percent");
+    }
+
+    #[test]
+    fn rejects_quota_days_remaining() {
+        rejects("quota_days_remaining");
+    }
+
+    #[test]
+    fn saved_candidate_omits_removed_settings() {
+        let saved = toml::to_string(&CandidateConfig::default()).unwrap();
+        assert!(!saved.contains("quota_usage_percent"));
+        assert!(!saved.contains("quota_days_remaining"));
+    }
 }

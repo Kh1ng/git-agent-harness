@@ -1,12 +1,13 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
     decide_route, failure_text_with_internal_log, preflight_identity,
-    record_external_approval_consumption_for_last_attempt, record_route_attempt,
-    reserve_backend_attempt, resolve_llm, route_after_backend_unavailable, route_identity,
-    route_label, run_backend_with_reserved_route, validation_retry_route, wip_checkpoint_branch,
+    record_external_approval_consumption_for_last_attempt, record_route_attempt, resolve_llm,
+    route_after_backend_unavailable, route_identity, route_label, run_backend_with_reserved_route,
+    validation_retry_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
+use super::super::issue_claim::IssueClaimSlot;
 use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
 };
@@ -40,6 +41,7 @@ mod conflict_resolution;
 #[path = "improve/finish.rs"]
 mod finish;
 mod handoff;
+mod job_contract;
 mod publish_mr;
 use finish::finish_improve_workflow;
 mod repair;
@@ -51,7 +53,6 @@ mod work_identity;
 use work_identity::{
     apply_manual_fix_context_to_ledger, resolve_manual_fix_context, resolve_target,
 };
-
 pub(crate) fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -65,7 +66,6 @@ pub(crate) fn improve(
         .claude_path
         .clone()
         .unwrap_or_else(|| "claude".to_string());
-
     // Enforce policy before any mutations
     let push_action = if args.prod {
         "git-push-prod"
@@ -74,7 +74,6 @@ pub(crate) fn improve(
     };
     enforce_policy(profile, "open-draft-pr")?;
     enforce_policy(profile, push_action)?;
-
     let manual_fix = resolve_manual_fix_context(
         cfg,
         &args.profile,
@@ -83,9 +82,7 @@ pub(crate) fn improve(
         args.existing_branch.clone(),
         args.mr.as_deref(),
     )?;
-
     let target = resolve_target(args, profile, &manual_fix)?;
-
     // Resolve target as an issue number, propagating real fetch errors.
     let issue_details =
         resolve_target_to_issue_or_string(profile, &target, args.issue_intake_override)?;
@@ -93,6 +90,7 @@ pub(crate) fn improve(
         println!("Issue intake override enabled for explicit issue dispatch");
     }
 
+    let job_contract = job_contract::for_dispatch(args, issue_details.is_some())?;
     let ticket_meta = if let Some(ref issue) = issue_details {
         Some(parse_ticket_metadata_from_issue(issue))
     } else {
@@ -281,6 +279,7 @@ pub(crate) fn improve(
     let validation_environment = cargo_target.environment();
 
     let mut base_task = build_redispatch_task(profile, &wt, args, &target, issue_details.as_ref());
+    job_contract::append_prompt(job_contract.as_ref(), &mut base_task);
     if let Some(repair_context) = repair_context.as_ref() {
         repair_context::append_to_prompt(&mut base_task, repair_context);
     }
@@ -368,6 +367,7 @@ pub(crate) fn improve(
     let mut prev_failure: Option<String> = None;
     let mut prior_phase_context: Option<String> = None;
     let mut backend_summary = String::new();
+    let mut issue_claim = IssueClaimSlot::default();
     // Retry checkpoints are temporary recovery refs. They are deliberately
     // retained on any terminal failure, then removed only after a successful
     // publish so real partial work is never silently discarded.
@@ -440,11 +440,7 @@ pub(crate) fn improve(
             }
         };
         task = context;
-        let admission_guard =
-            reserve_backend_attempt(profile, &route.identity, args.route_admission.as_ref())
-                .map_err(|error| {
-                    super::super::contextualize_capacity_deferral(error, attempt as usize)
-                })?;
+        let admission_guard = issue_claim.admit(profile, &route.identity, args, attempt, ledger)?;
         record_route_attempt(ledger, &route)?;
         let result = run_backend_with_reserved_route(
             &route.identity,
@@ -1039,7 +1035,7 @@ pub(crate) fn improve(
             );
         }
 
-        if profile.validation_commands.is_empty() {
+        if profile.validation_commands.is_empty() && job_contract.is_none() {
             ledger.validation_result = Some("not_run".into());
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 resources: Some(result.resources.clone()),
@@ -1073,8 +1069,8 @@ pub(crate) fn improve(
             "Running validation ({} commands)...",
             profile.validation_commands.len()
         );
-        match validate_with_exit_code(
-            &profile.validation_commands,
+        match job_contract::validate_round(
+            (job_contract.as_ref(), profile),
             &wt,
             &validation_environment,
             timeout,
@@ -1473,6 +1469,7 @@ pub(crate) fn improve(
         }
     }
 
+    issue_claim.ensure_held_before_publish(profile, &args.mode, &wt, repo)?;
     finish_improve_workflow(
         cfg,
         profile,
@@ -1492,6 +1489,9 @@ pub(crate) fn improve(
         &route.effective_backend,
         route.effective_model.as_deref(),
         &llm.model,
+        job_contract.as_ref(),
+        &validation_environment,
+        timeout,
     )
 }
 

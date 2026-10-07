@@ -9,6 +9,9 @@ use std::process::Command;
 
 fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
     let gh_path = bin_dir.join("gh");
+    // Another test may still be executing the old fixture through PATH.
+    // Replace its inode instead of truncating an executable that is in use.
+    let staged = tempfile::NamedTempFile::new_in(bin_dir).unwrap();
     let content = format!(
         "#!/bin/sh\n\
              case \"$4\" in\n\
@@ -18,14 +21,15 @@ fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
              esac\n",
         response_json.replace('\'', "'\\''")
     );
-    fs::write(&gh_path, content).unwrap();
+    fs::write(staged.path(), content).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        let mut perms = fs::metadata(staged.path()).unwrap().permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&gh_path, perms).unwrap();
+        fs::set_permissions(staged.path(), perms).unwrap();
     }
+    staged.into_temp_path().persist(&gh_path).unwrap();
 }
 
 fn setup_fake_gh_merge(bin_dir: &Path) {
@@ -1472,6 +1476,9 @@ fn ticket_scan_capacity_deferral_resolves_claim_without_changing_attempt_history
     assert_eq!(after.0, 1);
     assert_eq!(after.1, 1);
 }
+
+#[path = "tests/repeated_setup.rs"]
+mod repeated_setup;
 
 #[path = "tests/repository_scope.rs"]
 mod repository_scope;

@@ -1,6 +1,6 @@
 use crate::config::Profile;
 use crate::ledger::LedgerEntry;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -362,6 +362,118 @@ const ALLOWED_FAILURE_STAGES: &[&str] = &[
     "sync",
 ];
 
+/// Effort one issue has consumed, for the per-issue budget
+/// (`routing.issue_budget`). Projected from the ledger alone; never stored.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct IssueBudgetUsage {
+    /// Worker attempts across every implementation dispatch for the issue.
+    /// A dispatch that failed in setup (preflight, backend launch,
+    /// environment) still counts as one attempt; a dispatch that failed
+    /// over between backends counts every backend attempt it started.
+    pub attempts: u32,
+    /// Summed recorded duration of the counted implementation and review
+    /// entries.
+    pub elapsed_seconds: f64,
+    /// Review verdicts recorded for the issue, matched by work id or by one
+    /// of the issue's implementation branches.
+    pub manager_rounds: u32,
+    /// Failure class of the newest counted implementation entry, kept from
+    /// the previous one when the newest recorded none (as the retry-cap
+    /// projection does).
+    pub last_failure_class: Option<String>,
+}
+
+/// The identity one issue's usage is filed under: the provider form
+/// (`#42`) when the work id has one, otherwise the work id itself.
+pub(crate) fn canonical_work_id(work_id: &str) -> String {
+    crate::ledger::work_id_aliases(work_id)
+        .into_iter()
+        .find(|alias| alias.starts_with('#'))
+        .unwrap_or_else(|| work_id.to_string())
+}
+
+/// Budget usage of every issue in `entries` (ledger order), keyed by
+/// `canonical_work_id`, in one pass. Entries filed under any alias of a
+/// work id (`#42`, `TICKET-42`) count together, as do review verdicts of
+/// the issue's implementation branches that carry no work id. Claims,
+/// control records, dispatches that never launched a backend (capacity
+/// deferral, lost claim), reviews without a verdict and entries of other
+/// profiles or repos do not count; a `clear_attempts` tombstone resets the
+/// issue's usage recorded before it.
+pub(crate) fn issue_budget_usages(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+    profile: &Profile,
+) -> BTreeMap<String, IssueBudgetUsage> {
+    use crate::job_kind::{JobFamily, JobKind};
+
+    let mut usages: BTreeMap<String, IssueBudgetUsage> = BTreeMap::new();
+    let mut branch_owner: HashMap<&str, String> = HashMap::new();
+    for entry in entries.iter().filter(|entry| {
+        entry.profile == profile_name
+            && entry.repo_id == profile.repo_id
+            && !crate::ledger::is_entry_stale(entry)
+    }) {
+        let own = entry.work_id.as_deref().map(canonical_work_id);
+        if entry.mode == "clear_attempts" {
+            if let Some(key) = own {
+                usages.remove(&key);
+                branch_owner.retain(|_, owner| *owner != key);
+            }
+            continue;
+        }
+        if crate::ledger::gates::launched_no_backend(entry) {
+            continue;
+        }
+        let Ok(kind) = JobKind::parse(&entry.mode) else {
+            continue;
+        };
+        let duration = entry.duration_seconds.unwrap_or(0.0);
+        match (own, kind.family()) {
+            (Some(key), JobFamily::ImproveLike) => {
+                if let Some(branch) = entry.branch.as_deref() {
+                    branch_owner.insert(branch, key.clone());
+                }
+                let usage = usages.entry(key).or_default();
+                usage.attempts += entry.attempts_started.unwrap_or(0).max(1);
+                usage.elapsed_seconds += duration;
+                usage.last_failure_class = entry
+                    .failure_class
+                    .clone()
+                    .or(usage.last_failure_class.take());
+            }
+            (own, JobFamily::Review) if entry.review_verdict.is_some() => {
+                let key = own.or_else(|| {
+                    entry
+                        .branch
+                        .as_deref()
+                        .and_then(|branch| branch_owner.get(branch).cloned())
+                });
+                if let Some(key) = key {
+                    let usage = usages.entry(key).or_default();
+                    usage.manager_rounds += 1;
+                    usage.elapsed_seconds += duration;
+                }
+            }
+            _ => {}
+        }
+    }
+    usages
+}
+
+/// `work_id`'s budget usage; see `issue_budget_usages`.
+#[cfg(test)]
+pub(crate) fn issue_budget_usage(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+    profile: &Profile,
+    work_id: &str,
+) -> IssueBudgetUsage {
+    issue_budget_usages(entries, profile_name, profile)
+        .remove(&canonical_work_id(work_id))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{prior_attempt_context, read_bounded_tail, VALIDATION_ARTIFACT_READ_MAX_BYTES};
@@ -374,6 +486,124 @@ mod tests {
     fn read_test_tail(path: &std::path::Path) -> std::io::Result<String> {
         let root = std::fs::canonicalize(path.parent().unwrap())?;
         read_bounded_tail(path, &root, &root)
+    }
+
+    fn budget_entry(profile: &crate::config::Profile, mode: &str) -> LedgerEntry {
+        LedgerEntry::new("test", profile, "codex", mode, "ticket", None, None)
+    }
+
+    #[test]
+    fn issue_budget_usage_counts_setup_failures_failover_and_branch_reviews() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = crate::dispatch::test_util::profile(tmp.path());
+
+        let mut setup_failure = budget_entry(&profile, "improve");
+        setup_failure.work_id = Some("#42".into());
+        setup_failure.failure_class = Some("environment_error".into());
+        setup_failure.failure_stage = Some("preflight".into());
+        setup_failure.attempts_started = Some(0);
+        setup_failure.duration_seconds = Some(30.0);
+
+        let mut failover = budget_entry(&profile, "fix");
+        failover.work_id = Some("TICKET-42".into());
+        failover.branch = Some("gah/issue/gah-42".into());
+        failover.attempts_started = Some(2);
+        failover.duration_seconds = Some(600.0);
+
+        let mut review = budget_entry(&profile, "review");
+        review.branch = Some("gah/issue/gah-42".into());
+        review.review_verdict = Some("NEEDS_FIX".into());
+        review.duration_seconds = Some(90.0);
+
+        let mut skipped_review = review.clone();
+        skipped_review.review_verdict = None;
+        skipped_review.validation_result = Some("skipped_duplicate_review".into());
+        skipped_review.duration_seconds = Some(500.0);
+
+        let mut own_review = budget_entry(&profile, "review");
+        own_review.work_id = Some("TICKET-42".into());
+        own_review.branch = Some("gah/issue/gah-42".into());
+        own_review.review_verdict = Some("APPROVE".into());
+
+        let mut claim = LedgerEntry::new_claim("test", &profile, "#42");
+        claim.duration_seconds = Some(999.0);
+
+        let mut claim_lost = budget_entry(&profile, "improve");
+        claim_lost.work_id = Some("#42".into());
+        claim_lost.validation_result = Some(crate::ledger::gates::CLAIM_LOST.into());
+        claim_lost.duration_seconds = Some(999.0);
+
+        let mut deferred = budget_entry(&profile, "improve");
+        deferred.work_id = Some("#42".into());
+        deferred.validation_result = Some("deferred_capacity".into());
+
+        let mut other_issue = budget_entry(&profile, "improve");
+        other_issue.work_id = Some("#43".into());
+        other_issue.attempts_started = Some(1);
+
+        let mut other_repo = budget_entry(&profile, "improve");
+        other_repo.work_id = Some("#42".into());
+        other_repo.repo_id = "elsewhere".into();
+
+        let usage = super::issue_budget_usage(
+            &[
+                setup_failure,
+                failover,
+                review,
+                skipped_review,
+                own_review,
+                claim,
+                claim_lost,
+                deferred,
+                other_issue,
+                other_repo,
+            ],
+            "test",
+            &profile,
+            "#42",
+        );
+
+        assert_eq!(usage.attempts, 3);
+        assert_eq!(usage.manager_rounds, 2);
+        assert_eq!(usage.elapsed_seconds, 720.0);
+        assert_eq!(
+            usage.last_failure_class.as_deref(),
+            Some("environment_error")
+        );
+    }
+
+    #[test]
+    fn issue_budget_usage_resets_at_a_clear_attempts_tombstone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = crate::dispatch::test_util::profile(tmp.path());
+
+        let mut before = budget_entry(&profile, "improve");
+        before.work_id = Some("TICKET-7".into());
+        before.branch = Some("gah/issue/gah-7".into());
+        before.failure_class = Some("agent_failure".into());
+        before.duration_seconds = Some(100.0);
+        let mut old_review = budget_entry(&profile, "review");
+        old_review.branch = Some("gah/issue/gah-7".into());
+        old_review.review_verdict = Some("NEEDS_FIX".into());
+        let tombstone = LedgerEntry::new_clear_attempts("test", &profile, "#7");
+        let mut after = budget_entry(&profile, "improve");
+        after.work_id = Some("#7".into());
+        after.duration_seconds = Some(5.0);
+        let mut orphan_review = budget_entry(&profile, "review");
+        orphan_review.branch = Some("gah/issue/gah-7".into());
+        orphan_review.review_verdict = Some("NEEDS_FIX".into());
+
+        let usage = super::issue_budget_usage(
+            &[before, old_review, tombstone, after, orphan_review],
+            "test",
+            &profile,
+            "TICKET-7",
+        );
+
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(usage.manager_rounds, 0);
+        assert_eq!(usage.elapsed_seconds, 5.0);
+        assert_eq!(usage.last_failure_class, None);
     }
 
     #[test]

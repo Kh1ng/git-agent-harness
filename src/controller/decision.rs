@@ -44,6 +44,39 @@ fn ticket_consumes_worker_slot(ticket: &crate::models::AvailableTicket) -> bool 
     ticket.execution_policy.dispatchable_now
 }
 
+/// The per-issue budget projected by status for `ticket`, when the profile
+/// enforces one (`routing.issue_budget`). Status also marks a spent budget
+/// as a ticket-scoped `human_required` hold; the checks below keep the
+/// controller honest even when only the projection is present.
+fn issue_budget_for<'a>(
+    snapshot: &'a StatusSnapshot,
+    ticket: &crate::models::AvailableTicket,
+) -> Option<&'a crate::status::IssueBudgetStatus> {
+    snapshot
+        .work_waypoint_evidence
+        .get(ticket.work_id.as_deref()?)?
+        .issue_budget
+        .as_ref()
+}
+
+/// A spent budget refuses every new attempt, escalation included.
+fn budget_refuses_attempt(
+    snapshot: &StatusSnapshot,
+    ticket: &crate::models::AvailableTicket,
+) -> bool {
+    issue_budget_for(snapshot, ticket).is_some_and(|budget| budget.exhausted)
+}
+
+/// Inside the escalation reserve a same-tier retry is refused; only an
+/// escalation may spend what is left.
+fn budget_refuses_retry(
+    snapshot: &StatusSnapshot,
+    ticket: &crate::models::AvailableTicket,
+) -> bool {
+    issue_budget_for(snapshot, ticket)
+        .is_some_and(|budget| budget.exhausted || budget.escalation_only)
+}
+
 /// A failed-CI repair may reuse review findings only when sync proved they
 /// belong to the currently observed source/metadata generation and carry a
 /// verdict that repair preflight can consume.
@@ -521,6 +554,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // retried, escalated, nor redispatched -- but unrelated eligible
         // tickets keep flowing.
         .filter(|t| !t.human_required)
+        .filter(|t| !budget_refuses_attempt(snapshot, t))
         .collect();
     failed_tickets.sort_by(|a, b| ticket_order(a, b));
 
@@ -544,6 +578,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     });
     let has_retry_candidate = failed_tickets.iter().any(|t| {
         !exhausted.contains(t.work_id.as_ref().unwrap_or(&t.ticket_path))
+            && !budget_refuses_retry(snapshot, t)
             && t.last_failure_class
                 .as_deref()
                 .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
@@ -554,6 +589,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             && !t.has_active_claim
             && t.prior_attempt_count == 0
             && !t.human_required
+            && !budget_refuses_attempt(snapshot, t)
     });
 
     // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
@@ -614,6 +650,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // TICKET-human-required-scoping: skip work-item-scoped
         // human_required tickets; they await human action, not dispatch.
         .filter(|t| !t.human_required)
+        .filter(|t| !budget_refuses_attempt(snapshot, t))
         .collect();
     undispatched.sort_by(|a, b| ticket_order(a, b));
     if let Some(ticket) = undispatched.first() {
@@ -633,7 +670,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     // before every fresh ticket turns one unavailable provider into a backlog
     // stall.  Preserve retryability after the fresh queue has made progress.
     for ticket in &failed_tickets {
-        if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path)) {
+        if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path))
+            || budget_refuses_retry(snapshot, ticket)
+        {
             continue;
         }
         if let Some(fc) = ticket.last_failure_class.as_deref() {
@@ -659,6 +698,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     // quota reset (production incident #466).
     let has_capacity_blocked_retry = failed_tickets.iter().any(|ticket| {
         !exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path))
+            && !budget_refuses_retry(snapshot, ticket)
             && ticket
                 .last_failure_class
                 .as_deref()

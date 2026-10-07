@@ -414,6 +414,12 @@ pub fn plan_remediation(context: RemediationContext<'_>) -> RemediationPlan {
                 )
             }
         }
+        HumanRequiredReason::RepeatedSetupFailure => no_auto(
+            profile_name, work_id, reference, reason_code,
+            RemediationAuthority::Operator,
+            "Correct the repeated setup failure, then clear attempts to release the derived gate",
+            retry_budget_actions(profile_name, work_id),
+        ),
         HumanRequiredReason::StuckLoopGate => no_auto(
             profile_name,
             work_id,

@@ -4,6 +4,8 @@ use crate::status::{Blocker, ScopeStatusJson, StatusError, StatusSnapshot};
 
 #[path = "tests/backpressure.rs"]
 mod backpressure;
+#[path = "tests/issue_budget.rs"]
+mod issue_budget;
 #[path = "tests/lifecycle_priority.rs"]
 mod lifecycle_priority;
 #[path = "tests/pm.rs"]
@@ -1479,3 +1481,5 @@ fn pr_past_fix_cap_does_not_block_eligible_ticket_dispatch() {
         other => panic!("expected DispatchTicket for TICKET-B, got {other:?}"),
     }
 }
+#[path = "tests/repeated_setup.rs"]
+mod repeated_setup;

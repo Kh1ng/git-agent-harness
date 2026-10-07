@@ -21,6 +21,7 @@ mod environment;
 mod error;
 pub(crate) mod external_approval_pause;
 mod identity;
+mod issue_claim;
 mod issues;
 mod metrics;
 mod mutation_policy;
@@ -82,7 +83,9 @@ pub(crate) use self::attempts::{
 pub(crate) use self::claims::duplicate_work_error;
 pub use self::claims::{merge_branch, MergeExecution};
 pub(crate) use self::claims::{scan_available_tickets_with_dependencies, TicketScan};
+pub(crate) use self::issue_claim::issue_claim_lost;
 pub(crate) use self::prior_attempts::prior_attempt_context;
+pub(crate) use self::prior_attempts::{issue_budget_usages, IssueBudgetUsage};
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 fn ensure_terminal_failure_attribution(

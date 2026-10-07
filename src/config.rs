@@ -14,7 +14,7 @@ mod backend_paths;
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
 mod publishing;
-pub use publishing::PublishingPolicy;
+pub use publishing::{IssueClaimMode, IssueClaimPolicy, PublishingPolicy};
 mod delivery;
 pub use delivery::DeliveryMode;
 mod autonomy;
@@ -24,7 +24,7 @@ pub use external_credential_scopes::ExternalCredentialScope;
 mod routing_policy;
 mod worker_scaling;
 use routing_policy::merge_routing_policy;
-pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+pub use routing_policy::{CandidateConfig, IssueBudget, RoutingPolicy, TaskRoutingRule};
 mod default_paths;
 pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
 pub use worker_scaling::WorkerScaling;
@@ -880,9 +880,8 @@ pub mod tests {
                 priority: 0,
                 included_in_quota: false,
                 marginal_cost_usd: None,
-                quota_usage_percent: None,
-                quota_days_remaining: None,
                 requires_approval: false,
+                ..Default::default()
             }]),
             ..Default::default()
         };
@@ -895,9 +894,8 @@ pub mod tests {
                 priority: 0,
                 included_in_quota: false,
                 marginal_cost_usd: None,
-                quota_usage_percent: None,
-                quota_days_remaining: None,
                 requires_approval: false,
+                ..Default::default()
             }]),
             ..Default::default()
         };
@@ -1116,9 +1114,8 @@ pub mod tests {
                 priority: 2,
                 included_in_quota: true,
                 marginal_cost_usd: Some(0.0),
-                quota_usage_percent: Some(25.0),
-                quota_days_remaining: Some(5.0),
                 requires_approval: false,
+                ..Default::default()
             }]),
             task_routing_rules: vec![super::TaskRoutingRule {
                 modes: vec!["improve".into()],
@@ -1166,9 +1163,8 @@ pub mod tests {
                 priority: 0,
                 included_in_quota: false,
                 marginal_cost_usd: None,
-                quota_usage_percent: None,
-                quota_days_remaining: None,
                 requires_approval: false,
+                ..Default::default()
             }]),
             ..RoutingPolicy::default()
         };
@@ -1181,9 +1177,8 @@ pub mod tests {
                 priority: 0,
                 included_in_quota: false,
                 marginal_cost_usd: None,
-                quota_usage_percent: None,
-                quota_days_remaining: None,
                 requires_approval: false,
+                ..Default::default()
             }]),
             ..RoutingPolicy::default()
         };

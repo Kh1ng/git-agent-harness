@@ -1,6 +1,7 @@
+use super::issue_claim::issues_held_by_others;
 use super::text::utf8_safe_suffix;
 use super::text::{first_markdown_heading, normalize_match};
-use crate::config::Profile;
+use crate::config::{IssueClaimMode, Profile};
 use crate::models::WorkMetadata;
 use crate::provider::{gitlab_api, gitlab_project_id, provider_command};
 use anyhow::{Context, Result};
@@ -46,12 +47,38 @@ struct IssueAuthorIdentity {
 struct IssueRecord {
     details: IssueDetails,
     author: Option<IssueAuthorIdentity>,
+    assignees: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+/// Who holds an issue on the provider, for the managed check. Only autonomous
+/// discovery supplies it: an operator's explicit `--target #n` is the manager's
+/// own way of running the issue it holds, so that path never sees it.
+#[derive(Debug, Clone, Copy)]
+struct IssueHolders<'a> {
+    assignees: &'a [String],
+    /// The login this loop acts as. `None` when it could not be read, in which
+    /// case every assigned issue counts as held by someone else.
+    own_login: Option<&'a str>,
+}
+
+/// Why an issue counts as managed: a person or a manager agent owns it, so no
+/// autonomous start path may pick it up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManagedBy {
+    Label,
+    Assignee(String),
+    /// Someone is assigned and this loop could not read its own login, so it
+    /// cannot tell whether that someone is itself.
+    AssigneeUnknownSelf(String),
+}
+
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IssueIntakeDiscovery {
     pub(crate) allowed: Vec<IssueDetails>,
     pub(crate) rejected: Vec<crate::models::IssueIntakeRejection>,
+    /// Numbers of `allowed` issues another login holds on the provider (see
+    /// `issue_claim`). Always empty for a profile that keeps claims local.
+    pub(crate) claimed_elsewhere: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,27 +106,29 @@ impl IssueDisposition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum IntakeRejection {
     MissingAuthor,
     MalformedAuthorIdentity,
     UntrustedAuthor,
     CanonicalLabelRequired,
+    Managed(ManagedBy),
     Disposition(IssueDisposition),
 }
 
 impl IntakeRejection {
-    fn reason_code(self) -> &'static str {
+    fn reason_code(&self) -> &'static str {
         match self {
             Self::MissingAuthor => "missing_author",
             Self::MalformedAuthorIdentity => "malformed_author_identity",
             Self::UntrustedAuthor => "untrusted_author",
             Self::CanonicalLabelRequired => "canonical_autonomous_label_required",
+            Self::Managed(_) => MANAGED_REASON_CODE,
             Self::Disposition(disposition) => disposition.reason_code(),
         }
     }
 
-    fn reason(self, canonical_label: &str) -> String {
+    fn reason(&self, canonical_label: &str) -> String {
         match self {
             Self::MissingAuthor => "author identity missing or unreadable".to_string(),
             Self::MalformedAuthorIdentity => {
@@ -109,8 +138,106 @@ impl IntakeRejection {
             Self::CanonicalLabelRequired => {
                 format!("missing canonical autonomous label '{canonical_label}'")
             }
+            Self::Managed(ManagedBy::Label) => {
+                "managed: the managed label is on it, so a manager owns this issue".to_string()
+            }
+            Self::Managed(ManagedBy::Assignee(login)) => {
+                format!("managed: assigned to {login}, who is not this loop")
+            }
+            Self::Managed(ManagedBy::AssigneeUnknownSelf(login)) => format!(
+                "managed: assigned to {login}; this loop's own login could not be read, so the issue counts as someone else's"
+            ),
             Self::Disposition(disposition) => disposition.reason().to_string(),
         }
+    }
+}
+
+/// Reason code shown in status for an issue a manager owns.
+pub(crate) const MANAGED_REASON_CODE: &str = "managed";
+
+/// Labels that mark an issue as owned by a manager.
+pub(crate) fn issue_label_is_managed(label: &str) -> bool {
+    matches!(
+        label.trim().to_ascii_lowercase().as_str(),
+        "managed" | "gah:managed"
+    )
+}
+
+/// An issue is managed when it carries the managed label, or when any assignee
+/// is not the login this loop acts as. With no readable own login, any
+/// assignee at all means someone else holds it (fail closed).
+fn managed_rejection(labels: &[String], holders: IssueHolders<'_>) -> Option<ManagedBy> {
+    if labels.iter().any(|label| issue_label_is_managed(label)) {
+        return Some(ManagedBy::Label);
+    }
+    let Some(me) = holders.own_login else {
+        return holders
+            .assignees
+            .first()
+            .map(|assignee| ManagedBy::AssigneeUnknownSelf(assignee.trim().to_string()));
+    };
+    holders
+        .assignees
+        .iter()
+        .find(|assignee| !me.eq_ignore_ascii_case(assignee.trim()))
+        .map(|assignee| ManagedBy::Assignee(assignee.trim().to_string()))
+}
+
+/// Whether an assignee other than this loop makes an issue managed. With
+/// `issue_claim.mode = "github_assignee"` the assignee is a lease that
+/// `issue_claim` arbitrates (a stale one may be taken over), so only the
+/// label is durable there; with local claims an assignee is a person's or a
+/// manager's durable hold.
+fn assignees_mark_managed(profile: &Profile) -> bool {
+    profile.publishing.issue_claim.mode == IssueClaimMode::Local
+}
+
+/// The login this loop acts as on the provider, or `None` when the provider
+/// did not answer. Read once per discovery pass, never per issue.
+fn own_provider_login(profile: &Profile) -> Option<String> {
+    let login = match profile.provider_cli() {
+        Some("gh") => {
+            let out = provider_command("gh")
+                .args(["api", "user", "--jq", ".login"])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        Some("glab") => gitlab_api(profile, "user", "GET", &[])
+            .ok()?
+            .get("username")?
+            .as_str()?
+            .trim()
+            .to_string(),
+        _ => return None,
+    };
+    (!login.is_empty()).then_some(login)
+}
+
+/// The loop's own login, looked up only when the assignee rule applies and
+/// some issue is assigned at all, so an unassigned backlog costs no extra
+/// provider call.
+fn own_login_for_records(profile: &Profile, records: &[IssueRecord]) -> Option<String> {
+    (assignees_mark_managed(profile) && records.iter().any(|record| !record.assignees.is_empty()))
+        .then(|| own_provider_login(profile))
+        .flatten()
+}
+
+fn holders_of<'a>(
+    profile: &Profile,
+    record: &'a IssueRecord,
+    own_login: Option<&'a str>,
+) -> IssueHolders<'a> {
+    IssueHolders {
+        assignees: if assignees_mark_managed(profile) {
+            &record.assignees
+        } else {
+            &[]
+        },
+        own_login,
     }
 }
 
@@ -306,6 +433,7 @@ fn evaluate_issue_intake(
     author: Option<&IssueAuthorIdentity>,
     labels: &[String],
     allow_label_override: bool,
+    holders: Option<IssueHolders<'_>>,
 ) -> Result<(), IntakeRejection> {
     let Some(author) = author else {
         return Err(IntakeRejection::MissingAuthor);
@@ -315,6 +443,9 @@ fn evaluate_issue_intake(
     }
     if !issue_author_is_trusted(profile, author) {
         return Err(IntakeRejection::UntrustedAuthor);
+    }
+    if let Some(managed) = holders.and_then(|holders| managed_rejection(labels, holders)) {
+        return Err(IntakeRejection::Managed(managed));
     }
 
     if let Some(disposition) = issue_disposition_from_labels(profile, labels) {
@@ -365,6 +496,7 @@ pub(super) fn issue_details_from_github_response(
             .unwrap_or_default()
             .as_slice(),
         allow_label_override,
+        None,
     ) {
         anyhow::bail!(
             "GitHub issue #{} rejected for intake: {} ({})",
@@ -430,6 +562,7 @@ pub(super) fn issue_details_from_gitlab_response(
             .unwrap_or_default()
             .as_slice(),
         allow_label_override,
+        None,
     ) {
         anyhow::bail!(
             "GitLab issue #{} rejected for intake: {} ({})",
@@ -606,6 +739,15 @@ fn issue_record_from_github_value(resp: &serde_json::Value) -> IssueRecord {
             state,
         },
         author: parse_github_author(resp),
+        assignees: resp["assignees"]
+            .as_array()
+            .map(|assignees| {
+                assignees
+                    .iter()
+                    .filter_map(|assignee| assignee["login"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -635,6 +777,15 @@ fn issue_record_from_gitlab_value(profile: &Profile, resp: &serde_json::Value) -
             state,
         },
         author: parse_gitlab_author(profile, resp),
+        assignees: resp["assignees"]
+            .as_array()
+            .map(|assignees| {
+                assignees
+                    .iter()
+                    .filter_map(|assignee| assignee["username"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -693,29 +844,48 @@ fn discover_open_github_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
             );
         }
     }
+    let records = items
+        .iter()
+        .map(issue_record_from_github_value)
+        .collect::<Vec<_>>();
+    let own_login = own_login_for_records(profile, &records);
     let mut allowed = Vec::new();
     let mut rejected = Vec::new();
-    for resp in items {
-        let record = issue_record_from_github_value(&resp);
+    for record in records {
         match evaluate_issue_intake(
             profile,
             record.author.as_ref(),
             &record.details.labels,
             false,
+            Some(holders_of(profile, &record, own_login.as_deref())),
         ) {
-            Ok(()) => allowed.push(record.details),
+            Ok(()) => allowed.push(record),
             Err(rejection) => rejected.push(issue_rejection_snapshot(profile, &record, rejection)),
         }
     }
+    let claimed_elsewhere = issues_held_by_others(
+        profile,
+        allowed
+            .iter()
+            .map(|record| (record.details.number.as_str(), record.assignees.as_slice())),
+    )?;
 
-    Ok(IssueIntakeDiscovery { allowed, rejected })
+    Ok(IssueIntakeDiscovery {
+        allowed: allowed.into_iter().map(|record| record.details).collect(),
+        rejected,
+        claimed_elsewhere,
+    })
 }
 
 fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
     const PAGE_SIZE: usize = 100;
+    // Refuses a GitLab profile configured for GitHub assignee claims rather
+    // than running it with no cross-loop claim at all.
+    let claimed_elsewhere = issues_held_by_others(profile, [])?;
     let project_id = gitlab_project_id(profile)?;
     let mut allowed = Vec::new();
     let mut rejected = Vec::new();
+    let mut own_login: Option<String> = None;
     let mut page = 1;
     loop {
         let items = gitlab_api(
@@ -732,14 +902,21 @@ fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
         let items: Vec<serde_json::Value> =
             serde_json::from_value(items).context("parsing GitLab issue list response")?;
         let count = items.len();
+        let records = items
+            .iter()
+            .map(|resp| issue_record_from_gitlab_value(profile, resp))
+            .collect::<Vec<_>>();
+        if own_login.is_none() {
+            own_login = own_login_for_records(profile, &records);
+        }
 
-        for resp in items {
-            let record = issue_record_from_gitlab_value(profile, &resp);
+        for record in records {
             match evaluate_issue_intake(
                 profile,
                 record.author.as_ref(),
                 &record.details.labels,
                 false,
+                Some(holders_of(profile, &record, own_login.as_deref())),
             ) {
                 Ok(()) => allowed.push(record.details),
                 Err(rejection) => {
@@ -753,7 +930,11 @@ fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
         }
         page += 1;
     }
-    Ok(IssueIntakeDiscovery { allowed, rejected })
+    Ok(IssueIntakeDiscovery {
+        allowed,
+        rejected,
+        claimed_elsewhere,
+    })
 }
 
 #[cfg(test)]
@@ -761,22 +942,13 @@ pub(crate) fn discover_open_issues(profile: &Profile) -> IssueIntakeDiscovery {
     match profile.provider_cli() {
         Some("gh") => discover_open_github_issues(profile).unwrap_or_else(|e| {
             eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
-            IssueIntakeDiscovery {
-                allowed: vec![],
-                rejected: vec![],
-            }
+            IssueIntakeDiscovery::default()
         }),
         Some("glab") => discover_open_gitlab_issues(profile).unwrap_or_else(|e| {
             eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
-            IssueIntakeDiscovery {
-                allowed: vec![],
-                rejected: vec![],
-            }
+            IssueIntakeDiscovery::default()
         }),
-        _ => IssueIntakeDiscovery {
-            allowed: vec![],
-            rejected: vec![],
-        },
+        _ => IssueIntakeDiscovery::default(),
     }
 }
 
@@ -1227,17 +1399,21 @@ fn append_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
     }
 }
 
+/// Labels that keep an issue out of the ticket scan. Discovery already rejects
+/// a managed issue before this runs; the managed label is kept here so a
+/// caller outside discovery gets the same answer.
 pub(super) fn issue_is_auto_dispatch_blocked(labels: &[String]) -> bool {
     labels.iter().any(|label| {
-        matches!(
-            label.trim().to_ascii_lowercase().as_str(),
-            "executive:owner-decision"
-                | "exec:owner-decision"
-                | "blocked"
-                | "planning"
-                | "plan"
-                | "gah:blocked"
-        )
+        issue_label_is_managed(label)
+            || matches!(
+                label.trim().to_ascii_lowercase().as_str(),
+                "executive:owner-decision"
+                    | "exec:owner-decision"
+                    | "blocked"
+                    | "planning"
+                    | "plan"
+                    | "gah:blocked"
+            )
     })
 }
 
