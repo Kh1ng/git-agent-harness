@@ -124,7 +124,6 @@ fn parse(output: &[u8], account: &str, now: OffsetDateTime) -> Result<Vec<QuotaO
                     format!("Antigravity usage reported no readable {window} balance for {pool}")
                 }),
                 usage_source: Some(USAGE_SOURCE.into()),
-                mistral_admin: None,
                 account_usage: None,
             });
         }
