@@ -1,3 +1,4 @@
+import { isUsageLimitError } from './acpAdapter.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -5,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execPath } from 'node:process';
 import type { ChatTranscriptTurn } from '@git-agent-harness/contracts';
-import { agyBackendSpec, createHeadlessBackend, decodeVibeToolRequest, openhandsBackendSpec, parseOpenhandsReply, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
+import { agyBackendSpec, cursorBackendSpec, createHeadlessBackend, decodeVibeToolRequest, openhandsBackendSpec, parseOpenhandsReply, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
 
 /** A fake one-shot CLI: echoes its cwd marker file's content so the test
  * proves the turn ran in the session cwd, and echoes the prompt tail. The
@@ -678,4 +679,111 @@ test('a named Vibe instance derives its Python bridge from the selected launcher
     writeFileSync(selected, '#!/usr/bin/env python3\n');
     assert.throws(() => vibeBackendSpec({ executable: selected }).turnArgs(), /absolute Python interpreter/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Cursor argv, authentication and quota errors use the headless interfaces', () => {
+  const spec = cursorBackendSpec();
+  assert.deepEqual(spec.turnArgs({ model: 'sonnet', prompt: 'hello', resumeId: 'chat-1' }),
+    ['cursor-agent', '-p', '--output-format', 'stream-json', '--stream-partial-output', '--model', 'sonnet', '--resume', 'chat-1', 'hello']);
+  assert.throws(() => spec.parseReply!({ stdout: '', stderr: 'Authentication required: secret detail', exitCode: 1 }),
+    /^Error: Cursor backend unavailable: run cursor-agent login to authenticate, then retry\.$/);
+  assert.throws(() => spec.parseReply!({ stdout: '', stderr: 'You have reached your request limit', exitCode: 1 }),
+    error => isUsageLimitError(error));
+  assert.throws(() => spec.parseReply!({ stdout: '{"type":"result","is_error":true,"result":"Usage limit exceeded","session_id":"private-id"}', stderr: '', exitCode: 1 }),
+    error => error instanceof Error && isUsageLimitError(error) && !error.message.includes('private-id'));
+  assert.equal(isUsageLimitError(new Error('Authentication required')), false);
+});
+
+// Synthetic fixture based on https://cursor.com/docs/cli/reference/output-format.
+// A capture from an authenticated real CLI is still required for live verification.
+const cursorStream = [
+  { type: 'system', subtype: 'init', session_id: 'chat-1' },
+  { type: 'assistant', timestamp_ms: 1, message: { content: [{ type: 'text', text: 'Hello ' }] } },
+  { type: 'assistant', timestamp_ms: 2, model_call_id: 'call-1', message: { content: [{ type: 'text', text: 'Hello ' }] } },
+  { type: 'assistant', timestamp_ms: 3, message: { content: [{ type: 'text', text: 'world' }] } },
+  { type: 'assistant', message: { content: [{ type: 'text', text: 'Hello world' }] } },
+  { type: 'result', subtype: 'success', is_error: false, result: 'Hello world', session_id: 'chat-1' }
+].map(event => JSON.stringify(event)).join('\n');
+
+test('Cursor streams split NDJSON deltas once and uses the terminal result', () => {
+  const chunks: string[] = [];
+  const stream = cursorBackendSpec().createStream!(text => chunks.push(text));
+  for (const character of cursorStream) stream.feed(character);
+  assert.deepEqual(stream.finish(), { reply: 'Hello world', sessionId: 'chat-1' });
+  assert.deepEqual(chunks, ['Hello ', 'world']);
+  const truncated = cursorBackendSpec().createStream!(() => {});
+  truncated.feed('{"type":"system"}\n');
+  assert.throws(() => truncated.finish(), /without a terminal result/);
+  const malformed = cursorBackendSpec().createStream!(() => {});
+  assert.doesNotThrow(() => malformed.feed('not-json\n'));
+  assert.throws(() => malformed.finish(), SyntaxError);
+});
+
+test('Cursor persists chat metadata, resumes after adapter restart, and replays after failed resume', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-cursor-'));
+  const previous = process.env.GAH_CHAT_STATE_DIR;
+  try {
+    process.env.GAH_CHAT_STATE_DIR = dir;
+    const executable = join(dir, 'cursor-agent');
+    const record = join(dir, 'argv.jsonl');
+    writeFileSync(executable, `#!${execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(record)}, JSON.stringify({args, cwd:process.cwd()})+'\\n');
+if(args.includes('--list-models')) { fs.writeSync(1, 'sonnet - Sonnet\\n'); process.exit(0); }
+if(args.includes('--resume') && fs.existsSync(${JSON.stringify(join(dir, 'fail'))})) { fs.writeSync(2, 'Chat not found'); process.exit(1); }
+fs.writeSync(1, ${JSON.stringify(cursorStream)});
+`, { mode: 0o755 });
+    const input = { prompt: 'hello', history: [] as ChatTranscriptTurn[], cwd: dir, onChunk: () => {}, onToolResult: () => {} };
+    const first = createHeadlessBackend(cursorBackendSpec(executable));
+    assert.equal((await first.runTurn('p#session', input)).reply, 'Hello world');
+    const metadata = JSON.parse(readFileSync(join(dir, 'backend-sessions', 'p%23session-cursor.json'), 'utf8'));
+    assert.equal(metadata.sessionId, 'chat-1');
+    const second = createHeadlessBackend(cursorBackendSpec(executable));
+    const models = await second.listModels('p#session');
+    assert.equal(models.models[0].id, 'sonnet');
+    await second.listModels('p#session');
+    await second.runTurn('p#session', { ...input, prompt: 'next' });
+    writeFileSync(join(dir, 'fail'), '');
+    await second.runTurn('p#session', { ...input, prompt: 'retry', history: [{ role: 'assistant', text: 'past', timestamp: 1 }] });
+    const calls = readFileSync(record, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(calls.filter(call => call.args.includes('--list-models')).length, 1);
+    const turns = calls.filter(call => !call.args.includes('--list-models'));
+    assert.equal(turns[0].cwd, dir);
+    assert.ok(turns[1].args.includes('--resume'));
+    assert.equal(turns[1].args.at(-1), 'next');
+    assert.ok(!turns[3].args.includes('--resume'));
+    assert.equal(turns[3].args.at(-1), 'assistant: past\n\nuser: retry');
+  } finally {
+    if (previous === undefined) delete process.env.GAH_CHAT_STATE_DIR; else process.env.GAH_CHAT_STATE_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Cursor cancellation terminates descendants and rejects as cancelled', async () => {
+  if (process.platform === 'win32') return;
+  const dir = mkdtempSync(join(tmpdir(), 'gah-cursor-cancel-'));
+  const previous = process.env.GAH_CHAT_STATE_DIR;
+  try {
+    process.env.GAH_CHAT_STATE_DIR = dir;
+    const executable = join(dir, 'cursor-agent');
+    const marker = join(dir, 'descendant-survived');
+    writeFileSync(executable, `#!/bin/sh
+(sleep 1; touch '${marker}') &
+echo '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"type":"text","text":"ready"}]}}'
+wait
+`, { mode: 0o755 });
+    const backend = createHeadlessBackend(cursorBackendSpec(executable));
+    let ready!: () => void;
+    const started = new Promise<void>(resolve => { ready = resolve; });
+    const turn = backend.runTurn('cancel', { prompt: 'go', history: [], cwd: dir, onChunk: ready, onToolResult: () => {} });
+    await started;
+    await backend.cancelTurn('cancel');
+    await assert.rejects(turn, /Turn cancelled/);
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    assert.throws(() => readFileSync(marker), /ENOENT/);
+  } finally {
+    if (previous === undefined) delete process.env.GAH_CHAT_STATE_DIR; else process.env.GAH_CHAT_STATE_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -365,9 +365,9 @@ function summarizeToolOutput(tool: acp.ToolCallUpdate): string | null {
  * a handoff trigger. */
 export function classifyUsageLimitError(error: unknown): 'hard' | 'transient' | null {
   const message = error instanceof Error ? error.message : String(error);
-  if (/401|unauthorized|invalid api key|not logged in|cancelled|canceled/i.test(message)) return null;
+  if (/401|unauthorized|invalid api key|not logged in|authentication required|backend unavailable|cancelled|canceled/i.test(message)) return null;
   if (/not your usage limit/i.test(message)) return 'transient';
-  if (/usage limit|(?:session|weekly|monthly|daily) limit|individual quota reached|quota exhausted|insufficient (credits|quota)/i.test(message)) return 'hard';
+  if (/usage limit|(?:session|weekly|monthly|daily) limit|individual quota reached|quota exhausted|you have reached your request limit|insufficient (credits|quota)/i.test(message)) return 'hard';
   if (/rate limit|\b429\b|resource_exhausted|overloaded|server busy/i.test(message)) return 'transient';
   return null;
 }

@@ -9,26 +9,28 @@
  * a fresh process, since a one-shot process has no memory at all.
  *
  * The replayed prompt (full history + new message) is delivered to the
- * child process over stdin, never argv (issue #1009): a long-running
+ * child process over stdin for legacy adapters (issue #1009): a long-running
  * session's replayed transcript easily exceeds the OS ARG_MAX when passed
  * as a command-line argument, and spawn(2) fails with E2BIG before the
  * backend even starts. Argv stays a small, fixed set of flags regardless
- * of conversation length.
+ * of conversation length. Cursor uses its native positional prompt and resume id.
  *
  * What this buys: every backend in the unified chat surface, session
  * worktree binding (cwd per conversation), backend interchange, quota
- * handoff, and the event-sourced log — everything except streaming, native
- * slash commands, and the permission round-trip, which need a structured
- * protocol. AGY's CLI-native model/effort options are exposed.
+ * handoff, and the event-sourced log. Cursor streams structured deltas and
+ * resumes native chats; AGY exposes CLI-native model/effort options.
  */
 
 import { spawn, execFile as execFileCallback, execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import { runConfigShowProfile } from '../gahCli.js';
 import type { ManagerAdapter, ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo } from './registry.js';
+
+import { AsyncTtlCache } from '../asyncTtlCache.js';
+import { stateBase } from './chatSessions.js';
 
 export type { ManagerCommandInfo, ManagerModelInfo };
 
@@ -56,18 +58,16 @@ interface HeadlessProcessResult {
   exitCode: number | null;
 }
 
-/** Builds the CLI argv for one turn: cwd is passed by the engine; the spec
- * adds backend-specific flags. Bounded and content-free — never derived
- * from the prompt or history, so argv size cannot grow with conversation
- * length (issue #1009). */
+/** Builds one headless invocation. Legacy adapters keep prompts on stdin;
+ * Cursor accepts a positional prompt and can resume native sessions. */
 export interface HeadlessBackendSpec {
+  /** Persist native continuity separately from the event log. */
+  nativeSession?: boolean;
+  createStream?: (onChunk: (text: string) => void) => { feed: (text: string) => void; finish: () => { reply: string; sessionId: string | null } };
   id: string;
   displayName: string;
-  /** Argv for a print-mode turn. Must not embed prompt/history -- only the
-   * session's pinned model/reasoning-effort (#1032 reopened), which are
-   * bounded ids, not conversation content. A spec that has no native flag
-   * for one or both (e.g. vibe) may ignore the argument entirely. */
-  turnArgs: (opts?: { model?: string | null; reasoningEffort?: string | null }) => string[];
+  /** CLI flags and optional native session/prompt parameters. */
+  turnArgs: (opts?: { model?: string | null; reasoningEffort?: string | null; prompt?: string; resumeId?: string | null }) => string[];
   /** Encode this turn's full prompt (history already replayed in) for the
    * backend's stdin channel. */
   encodeStdin: (prompt: string) => string;
@@ -91,6 +91,7 @@ interface ConversationState {
   knownHistory: ChatTranscriptTurn[];
   /** Process handle for the in-flight turn (cancel support). */
   child: ReturnType<typeof spawn> | null;
+  cancelled: boolean;
   currentModelId: string | null;
   currentReasoningEffortId: string | null;
 }
@@ -131,7 +132,7 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
   function stateFor(key: string): ConversationState {
     let state = states.get(key);
     if (!state) {
-      state = { knownHistory: [], child: null, currentModelId: null, currentReasoningEffortId: null };
+      state = { knownHistory: [], child: null, cancelled: false, currentModelId: null, currentReasoningEffortId: null };
       states.set(key, state);
     }
     return state;
@@ -150,23 +151,47 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
     async runTurn(gahProfile, input) {
       const state = stateFor(gahProfile);
       const cwd = input.cwd ?? process.cwd();
+      state.cancelled = false;
+      const metadataPath = path.join(stateBase(), 'backend-sessions', `${encodeURIComponent(gahProfile)}-${spec.id}.json`);
+      let resumeId: string | null = null;
+      if (spec.nativeSession) {
+        try {
+          const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+          if (metadata.cwd === cwd && typeof metadata.sessionId === 'string') resumeId = metadata.sessionId;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+      const saveSession = (sessionId: string | null) => {
+        mkdirSync(path.dirname(metadataPath), { recursive: true });
+        const temporary = `${metadataPath}.${process.pid}.tmp`;
+        writeFileSync(temporary, JSON.stringify({ sessionId, cwd }));
+        renameSync(temporary, metadataPath);
+      };
 
-      // One non-interactive invocation: fixed argv, prompt over stdin.
+      // One non-interactive invocation per attempt.
       const invoke = async (prompt: string): Promise<string> => {
         const args = spec.turnArgs({
           model: input.model === undefined ? state.currentModelId : input.model,
-          reasoningEffort: input.reasoningEffort === undefined ? state.currentReasoningEffortId : input.reasoningEffort
+          reasoningEffort: input.reasoningEffort === undefined ? state.currentReasoningEffortId : input.reasoningEffort,
+          prompt, resumeId
         });
+        const env = { ...process.env, ...await spec.spawnEnv?.(input.profile ?? gahProfile) };
+        if (state.cancelled) throw new Error('Turn cancelled');
         const child = spawn(args[0], args.slice(1), {
           cwd,
-          env: { ...process.env, ...await spec.spawnEnv?.(input.profile ?? gahProfile) },
-          stdio: ['pipe', 'pipe', 'pipe']
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32'
         });
         state.child = child;
 
+        const stream = spec.createStream?.(input.onChunk);
         let stdout = '';
         let stderr = '';
-        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => { stdout += chunk; stream?.feed(chunk.toString()); });
         child.stderr.on('data', (chunk) => { stderr += chunk; });
         // The child may exit (e.g. a fast validation failure) before we
         // finish writing; a write past that point would otherwise raise an
@@ -176,7 +201,7 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
         child.stdin.end();
 
         const killTimer = setTimeout(() => {
-          child.kill('SIGKILL');
+          killProcessTree(child, 'SIGKILL');
         }, TURN_TIMEOUT_MS);
         killTimer.unref?.();
 
@@ -185,7 +210,11 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
             child.on('error', reject);
             child.on('close', (exitCode) => resolve(exitCode));
           });
-          const reply = parseReply({ stdout, stderr, exitCode: code });
+          if (state.cancelled) throw new Error('Turn cancelled');
+          const parsed = parseReply({ stdout, stderr, exitCode: code });
+          const streamed = stream?.finish();
+          const reply = streamed?.reply ?? parsed;
+          if (spec.nativeSession && streamed?.sessionId) saveSession(streamed.sessionId);
           if (reply.trim().length === 0) {
             throw new Error(`${spec.displayName} turn produced no output.`);
           }
@@ -196,11 +225,19 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
         }
       };
 
-      // A headless process has no memory: every turn replays the full
-      // conversation. (historyDelta-style catch-up is meaningless here, but
-      // keeping knownHistory lets future stream-json modes upgrade in place.)
+      // Replay the transcript for fresh processes; native sessions resume
+      // with only the new message and fall back when the saved chat is gone.
       let prompt = replayPrompt(input.prompt, input.history);
-      let reply = await invoke(prompt);
+      let reply: string;
+      try {
+        reply = await invoke(resumeId ? input.prompt : prompt);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!resumeId || state.cancelled || !/(?:chat|session).*(?:not found|does not exist)|(?:invalid|failed|unable|cannot).*resum|resum.*(?:failed|not found)|(?:failed|unable) to (?:load|find) (?:chat|session)/i.test(message)) throw error;
+        resumeId = null;
+        saveSession(null);
+        reply = await invoke(prompt);
+      }
 
       // #1041: a print-mode backend whose model emits a tool call the CLI
       // didn't execute leaks the raw request syntax as reply text, which
@@ -315,9 +352,11 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
 
     async cancelTurn(gahProfile): Promise<void> {
       const state = states.get(gahProfile);
+      if (state) state.cancelled = true;
       if (state?.child) {
-        state.child.kill('SIGTERM');
-        setTimeout(() => state.child?.kill('SIGKILL'), 3000).unref?.();
+        const child = state.child;
+        killProcessTree(child, 'SIGTERM');
+        setTimeout(() => killProcessTree(child, 'SIGKILL'), 3000).unref?.();
       }
     }
   };
@@ -670,5 +709,89 @@ export function agyBackendSpec(runtime?: { executable: string; state_root: strin
       const detail = stderr.trim().slice(0, 400) || `exit code ${exitCode}`;
       throw new Error(`Agy turn failed: ${detail}`);
     }
+  };
+}
+
+function killProcessTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+  if (!child.pid) return;
+  try {
+    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+    else process.kill(-child.pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
+
+/** Cursor's partial-output assistant events are deltas; the result is authoritative. */
+export function cursorBackendSpec(executable = 'cursor-agent'): HeadlessBackendSpec {
+  const models = new AsyncTtlCache<string, ManagerModelInfo[]>(60_000);
+  return {
+    id: 'cursor', displayName: 'Cursor', nativeSession: true,
+    turnArgs: (opts) => [executable, '-p', '--output-format', 'stream-json', '--stream-partial-output',
+      ...(opts?.model ? ['--model', opts.model] : []),
+      ...(opts?.resumeId ? ['--resume', opts.resumeId] : []), ...(opts?.prompt === undefined ? [] : [opts.prompt])],
+    encodeStdin: () => '',
+    parseReply: ({ stdout, stderr, exitCode }) => {
+      if (/Authentication required/i.test(`${stdout}\n${stderr}`)) {
+        throw new Error('Cursor backend unavailable: run cursor-agent login to authenticate, then retry.');
+      }
+      if (exitCode !== 0) {
+        let detail = stderr.trim();
+        if (!detail) {
+          for (const line of stdout.split('\n')) {
+            try {
+              const event = JSON.parse(line);
+              if (event.is_error && typeof event.result === 'string') detail = event.result;
+            } catch { /* Never put the raw stream (including chat ids) into the event log. */ }
+          }
+        }
+        throw new Error(`Cursor turn failed: ${detail.slice(0, 400) || `exit code ${exitCode}`}`);
+      }
+      return '';
+    },
+    createStream: (onChunk) => {
+      let completed = false;
+      let pending = '', reply = '', sessionId: string | null = null;
+      const line = (text: string) => {
+        if (!text.trim()) return;
+        const event = JSON.parse(text);
+        if (typeof event.session_id === 'string') sessionId = event.session_id;
+        if (event.type === 'assistant' && event.timestamp_ms !== undefined && event.model_call_id === undefined) {
+          for (const part of event.message?.content ?? []) {
+            if (part.type === 'text' && typeof part.text === 'string') { reply += part.text; onChunk(part.text); }
+          }
+        }
+        if (event.type === 'result') {
+          completed = true;
+          if (event.is_error) throw new Error(`Cursor turn failed: ${event.result}`);
+          if (typeof event.result === 'string') reply = event.result;
+        }
+      };
+      // Parsing errors are deferred until finish so event callbacks cannot crash the server.
+      let failure: unknown;
+      return {
+        feed: (text) => {
+          pending += text;
+          let newline: number;
+          while ((newline = pending.indexOf('\n')) >= 0) {
+            try { line(pending.slice(0, newline)); } catch (error) { failure = error; }
+            pending = pending.slice(newline + 1);
+          }
+        },
+        finish: () => { if (failure) throw failure; line(pending); if (!completed) throw new Error('Cursor stream ended without a terminal result.'); return { reply, sessionId }; }
+      };
+    },
+    modelOptions: async () => ({
+      models: await models.get(executable, async () => {
+        const { stdout } = await execFile(executable, ['--list-models'], { timeout: 15_000 }).catch(error => {
+          if (/Authentication required/i.test(String(error))) throw new Error('Cursor backend unavailable: run cursor-agent login to authenticate, then retry.');
+          throw error;
+        });
+        return stdout.replace(/\x1b\[[0-9;]*m/g, '').split('\n').flatMap(line => {
+          const match = /^\s*([a-z0-9][a-z0-9._-]*)\s*(?:-\s*(.+))?$/i.exec(line.trim());
+          return match ? [{ id: match[1], name: match[2] ?? match[1] }] : [];
+        });
+      }), reasoningEfforts: []
+    })
   };
 }

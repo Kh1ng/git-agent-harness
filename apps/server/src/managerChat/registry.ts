@@ -17,7 +17,7 @@ import {
   type ManagerModelInfo,
   type ManagerReasoningEffortInfo
 } from './acpAdapter.js';
-import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec, openhandsBackendSpec } from './headlessAdapter.js';
+import { createHeadlessBackend, cursorBackendSpec, vibeBackendSpec, agyBackendSpec, openhandsBackendSpec } from './headlessAdapter.js';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import { runBackendInstanceRuntime } from '../gahCli.js';
 import { bindOpenCodeModels, instanceAcpSpawn, instanceHeadlessSpec } from './instanceLaunch.js';
@@ -100,6 +100,7 @@ const REGISTRY: Record<string, ManagerAdapter> = {
   opencode: acpManagerAdapter('opencode', 'OpenCode', opencodeSpawnSpec),
   vibe: { ...createHeadlessBackend(vibeBackendSpec()) } as ManagerAdapter,
   agy: { ...createHeadlessBackend(agyBackendSpec()) } as ManagerAdapter,
+  cursor: createHeadlessBackend(cursorBackendSpec()),
   openhands: { ...createHeadlessBackend(openhandsBackendSpec()) } as ManagerAdapter
 };
 

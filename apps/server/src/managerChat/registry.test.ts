@@ -27,3 +27,9 @@ test('named adapter cache enforces backend ownership and changes after credentia
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('Cursor is an implemented manager chat backend', async () => {
+  const { resolveAdapter, listManagerBackends } = await import('./registry.js');
+  assert.equal(resolveAdapter('cursor').implemented, true);
+  assert.ok(listManagerBackends().some(backend => backend.id === 'cursor' && backend.displayName === 'Cursor'));
+});
