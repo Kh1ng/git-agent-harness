@@ -275,7 +275,7 @@ exit 0
     unsafe {
         libc::kill(unaffected.id() as i32, libc::SIGTERM);
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while unaffected.try_wait().unwrap().is_none() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }

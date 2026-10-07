@@ -7,7 +7,7 @@ fn account_rate_limits_read_round_trips_over_app_server() {
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
 
     let response =
-        read_account_rate_limits_with_env(&f.bin_dir.join("codex"), Duration::from_secs(10), &[])
+        read_account_rate_limits_with_env(&f.bin_dir.join("codex"), Duration::from_secs(1), &[])
             .expect("quota request must use the app-server RPC");
 
     assert_eq!(
@@ -39,7 +39,7 @@ fn isolated_account_quota_uses_only_its_child_home_and_removes_api_keys() {
         ("CODEX_API_KEY".into(), "synthetic-api-key".into()),
     ];
     let response =
-        read_account_rate_limits_with_env(&executable, Duration::from_secs(10), &environment)
+        read_account_rate_limits_with_env(&executable, Duration::from_secs(1), &environment)
             .unwrap();
     assert_eq!(
         response.pointer("/rateLimitsByLimitId/codex/primary/usedPercent"),
@@ -119,7 +119,7 @@ fn successful_helper_exit_reaps_its_background_descendants() {
     let discovery =
         discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500)).unwrap();
     assert_eq!(discovery.version.as_deref(), Some("codex-cli 1.2.3"));
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(1));
     std::thread::sleep(Duration::from_millis(700));
     assert!(!f.record_dir.join("version-helper-survived.marker").exists());
 }
@@ -215,7 +215,7 @@ fn nonblocking_setup_failure_closes_capture_and_starts_no_app_server() {
     .expect("nonblocking setup failure must fail construction");
 
     assert!(format!("{error:#}").contains("injected helper nonblocking failure"));
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(1));
     assert!(!f.record_dir.join("requests.jsonl").exists());
 }
 
@@ -244,7 +244,7 @@ fn helper_commands_are_bounded_and_reap_descendants() {
     }
     std::thread::sleep(Duration::from_millis(700));
     for (flag, survivor, elapsed, record_dir) in outcomes {
-        assert!(elapsed < Duration::from_secs(10), "{flag} took {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(1), "{flag} took {elapsed:?}");
         assert!(!record_dir.join(survivor).exists(), "{flag} leaked a child");
     }
 }
@@ -297,7 +297,7 @@ fn silent_initialize_times_out_and_terminates_its_transport() {
     )
     .err()
     .expect("silent initialize must time out");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(1));
     assert!(format!("{error:#}").contains("timed out waiting for Codex app-server response"));
     std::thread::sleep(Duration::from_millis(700));
     assert!(!f.record_dir.join("app-server-survived.marker").exists());
@@ -325,7 +325,7 @@ fn silent_turn_response_times_out_and_stops_remote_work() {
 
     let started = Instant::now();
     let error = session.send(&id, "silent-response").unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(1));
     assert!(error
         .to_string()
         .contains("timed out waiting for Codex app-server response"));

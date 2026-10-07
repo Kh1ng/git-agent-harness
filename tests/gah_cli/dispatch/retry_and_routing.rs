@@ -951,7 +951,7 @@ fn dispatch_fix_shutdown_after_backend_exit_preserves_completed_worktree_and_ski
         .spawn()
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !started.exists() {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("child exited before backend started: {status:?}");
@@ -1114,7 +1114,7 @@ esac
         .spawn()
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while !ready.exists() {
         if let Some(status) = first.try_wait().unwrap() {
             let output = first.wait_with_output().unwrap();

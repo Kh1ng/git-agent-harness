@@ -317,8 +317,8 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
              active_count_file='{active_count_file}'\n\
              active_lock_dir='{active_lock_dir}'\n\
              slow_release='{slow_release}'\n\
-             acquire_active_lock() {{ while ! (set -C; echo > \"$active_lock_dir\") 2>/dev/null; do sleep 0.01; done; }}\n\
-             release_active_lock() {{ rm -f \"$active_lock_dir\"; }}\n\
+             acquire_active_lock() {{ while ! mkdir \"$active_lock_dir\" 2>/dev/null; do sleep 0.01; done; }}\n\
+             release_active_lock() {{ rmdir \"$active_lock_dir\"; }}\n\
              inc_active() {{\n\
              \x20\x20acquire_active_lock\n\
              \x20\x20count=$( [ -f \"$active_count_file\" ] && cat \"$active_count_file\" || echo 0 )\n\
@@ -611,7 +611,7 @@ fn parallel_loop_reviews_a_finished_ticket_while_a_slow_sibling_still_runs() {
         &format!(
             "#!/bin/sh\n\
              mkdir -p '{calls}'\n\
-             n=1; while ! (set -C; echo > '{calls}'/$n) 2>/dev/null; do n=$((n + 1)); done\n\
+             n=1; while ! mkdir '{calls}'/$n 2>/dev/null; do n=$((n + 1)); done\n\
              printf 'agent edit %s\\n' \"$n\" > \"followup-$n.txt\"\n\
              if [ \"$n\" = 1 ]; then while [ ! -f '{slow_release}' ]; do sleep 0.05; done; fi\n\
              exit 0\n",
@@ -717,7 +717,7 @@ fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
         &fake_bin,
         "codex",
         &format!(
-            "#!/bin/sh\nlock='{calls}.lock'\nwhile ! (set -C; echo > \"$lock\") 2>/dev/null; do sleep 0.01; done\nn=$(cat '{calls}.count' 2>/dev/null || echo 0)\nn=$((n + 1))\necho \"$n\" > '{calls}.count'\nif [ \"$n\" -eq 2 ]; then pwd > '{calls}.failure-pwd'; fi\nrm -f \"$lock\"\nif [ \"$n\" -eq 1 ]; then printf 'slow-start\\n' >> '{calls}'; sleep 5; printf 'slow edit\\n' > slow.txt; printf 'slow-done\\n' >> '{calls}'; exit 0; fi\nif [ -f '{calls}.failure-pwd' ] && [ \"$PWD\" = \"$(cat '{calls}.failure-pwd')\" ]; then printf 'failed\\n' >> '{calls}'; exit 9; fi\nprintf 'refilled\\n' >> '{calls}'\nprintf 'unexpected\\n' > third.txt\nexit 0\n",
+            "#!/bin/sh\nlock='{calls}.lock'\nwhile ! mkdir \"$lock\" 2>/dev/null; do sleep 0.01; done\nn=$(cat '{calls}.count' 2>/dev/null || echo 0)\nn=$((n + 1))\necho \"$n\" > '{calls}.count'\nif [ \"$n\" -eq 2 ]; then pwd > '{calls}.failure-pwd'; fi\nrmdir \"$lock\"\nif [ \"$n\" -eq 1 ]; then printf 'slow-start\\n' >> '{calls}'; sleep 5; printf 'slow edit\\n' > slow.txt; printf 'slow-done\\n' >> '{calls}'; exit 0; fi\nif [ -f '{calls}.failure-pwd' ] && [ \"$PWD\" = \"$(cat '{calls}.failure-pwd')\" ]; then printf 'failed\\n' >> '{calls}'; exit 9; fi\nprintf 'refilled\\n' >> '{calls}'\nprintf 'unexpected\\n' > third.txt\nexit 0\n",
             calls = calls.display(),
         ),
     );
@@ -869,8 +869,8 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
              active_count_file='{active_count}'\n\
              second_started='{second_started}'\n\
              slow_release='{slow_release}'\n\
-             acquire_active_lock() {{ while ! (set -C; echo > \"$lock\") 2>/dev/null; do sleep 0.01; done; }}\n\
-             release_active_lock() {{ rm -f \"$lock\"; }}\n\
+             acquire_active_lock() {{ while ! mkdir \"$lock\" 2>/dev/null; do sleep 0.01; done; }}\n\
+             release_active_lock() {{ rmdir \"$lock\"; }}\n\
              inc_active() {{\n               acquire_active_lock\n\
                count=$( [ -f \"$active_count_file\" ] && cat \"$active_count_file\" || echo 0 )\n\
                count=$((count + 1))\n\
