@@ -689,7 +689,7 @@ function HelperRoutingCard({ profiles, settings, disabled, onSave }: {
   );
 }
 
-function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles: ProfileSummary[] }) {
+export function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles: ProfileSummary[] }) {
   const [settings, setSettings] = useState<ManagerChatSettingsSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -798,6 +798,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
       {profilesWithoutOverride.length > 0 && (
         <div className="flex items-center gap-2 mt-2">
           <select
+            aria-label="Override profile"
             value={newOverrideProfile}
             onChange={(e) => setNewOverrideProfile(e.target.value)}
             className="flex-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
@@ -810,6 +811,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
             ))}
           </select>
           <select
+            aria-label="Override backend"
             value={newOverrideBackend}
             onChange={(e) => setNewOverrideBackend(e.target.value)}
             className="flex-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
