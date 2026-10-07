@@ -27,7 +27,7 @@
     "last_success_at": null,
     "record_count": 0,
     "retry_pending": false,
-    "schema_version": 10,
+    "schema_version": 11,
     "status": "never_run"
   },
   "fix_attempt_counts": {},
@@ -136,5 +136,9 @@
   "review_held_work_ids": [],
   "schema_version": 1,
   "skill_inventory": [],
-  "work_waypoint_evidence": {}
+  "work_waypoint_evidence": {},
+  "worker_limits": {
+    "baseline_workers": 1,
+    "workers": 1
+  }
 }

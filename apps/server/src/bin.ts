@@ -14,6 +14,7 @@ import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { markReadinessCheck } from './serverReadiness.js';
+import { resolveWebRoot } from './webRoot.js';
 import {
   InvalidBindHostError,
   resolveBindHost,
@@ -27,6 +28,8 @@ import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
 import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
 import { LoginRepairBroker, LoginRepairs, loadProviderKeys } from './loginRepair.js';
+import { WorkerUpdateBroker } from './workerUpdateBroker.js';
+import { WorkerUpdateService } from './workerUpdate.js';
 import { createCliRouterQuotaObserver } from './cliRouter.js';
 import { startQuotaRefreshScheduler } from './quotaRefreshScheduler.js';
 
@@ -96,6 +99,20 @@ async function main() {
 
   const cliRouterQuotaObserver = node.role === 'central' ? createCliRouterQuotaObserver() : undefined;
 
+  // Issue #1416: a worker runs release updates on central's instruction;
+  // central brokers the fleet's updates and sweeps opted-in nodes.
+  const workerUpdates = node.role === 'worker' ? new WorkerUpdateService() : undefined;
+  const workerUpdateBroker = node.role === 'central'
+    ? new WorkerUpdateBroker({ localNodeId: coordinatorIdentity.node_id, registry: registryService })
+    : undefined;
+  let stopWorkerAutoUpdate: (() => void) | undefined;
+
+  // A central or standalone node serves the dashboard itself unless the
+  // operator pointed GAH_WEB_ROOT elsewhere or emptied it (#1327). A worker
+  // has no dashboard.
+  const webRoot = node.role === 'worker' ? null : resolveWebRoot(process.env.GAH_WEB_ROOT);
+  process.env.GAH_WEB_ROOT = webRoot ?? '';
+
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
@@ -109,6 +126,8 @@ async function main() {
     authHealthMonitor,
     loginRepairs,
     loginRepairBroker,
+    workerUpdates,
+    workerUpdateBroker,
     cliRouterQuotaObserver
   });
   
@@ -168,6 +187,18 @@ async function main() {
   // goes dark. No-op when no nodes are registered.
   if (node.role === 'central') registryService.startLivenessScheduler();
 
+  // Issue #1416: opted-in nodes update themselves whenever central sees
+  // them behind; the sweep is quiet when nothing is eligible.
+  if (workerUpdateBroker) {
+    const timer = setInterval(() => {
+      workerUpdateBroker!.autoUpdateSweep().catch((error) => {
+        console.error(`Worker auto-update sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, 5 * 60_000);
+    timer.unref?.();
+    stopWorkerAutoUpdate = () => clearInterval(timer);
+  }
+
   // Chat maintenance scheduler (#1036): settles chat sessions whose branch's
   // PR merged/closed (or whose issue closed) on a bounded interval instead
   // of only at the daily prune, so "the work shipped" is visible while it
@@ -183,6 +214,11 @@ async function main() {
     if (process.env.GAH_DISABLE_PRICE_REFRESH !== '1') startModelPriceRefresh(helperPriceExtractor('gah'), logLifecycle);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
+    if (webRoot) {
+      console.log(`Dashboard served from ${webRoot}`);
+    } else if (node.role !== 'worker') {
+      console.warn('No dashboard is served: apps/web is not built and GAH_WEB_ROOT is not set. Run `gah update`, or set GAH_WEB_ROOT to a built web app.');
+    }
     const warning = networkExposureWarning(HOST);
     if (warning) {
       console.warn(warning);
@@ -204,6 +240,7 @@ async function main() {
     logLifecycle('Shutting down...');
     registryService.stopLivenessScheduler();
     stopChatMaintenanceScheduler();
+    stopWorkerAutoUpdate?.();
     authHealthProber.stop();
     server.close();
     stopRouterQuotaRefresh?.();

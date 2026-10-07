@@ -20,6 +20,169 @@ fn quota_provider_identifies_the_billed_service_instead_of_the_harness() {
         None
     );
 }
+
+// -- #1336: expected allowance sources ----------------------------------
+
+fn source_configuration(
+    vibe_admin: bool,
+    mistral_dashboard: bool,
+    nous_portal: bool,
+) -> checks::SourceConfiguration {
+    checks::SourceConfiguration {
+        vibe_admin,
+        mistral_dashboard,
+        nous_portal,
+    }
+}
+
+/// #1336 acceptance: a Vibe candidate opted into quota with no Vibe
+/// allowance source on the node expects the Mistral Admin source, which
+/// then surfaces as "not configured" instead of disappearing.
+#[test]
+fn a_vibe_candidate_without_an_allowance_source_expects_one() {
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "vibe".to_string(),
+            model: Some("mistral-medium".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    let expected = expected_quota_sources(&routing, &source_configuration(false, true, true));
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].backend, "vibe");
+    assert_eq!(expected[0].credential_id, None);
+    assert_eq!(expected[0].backend_instance, None);
+    assert_eq!(expected[0].provider.as_deref(), Some("mistral"));
+    assert!(expected[0].detail.contains("MISTRAL_ADMIN_API_KEY"));
+
+    // A configured credential checks the source on schedule; the snapshot's
+    // check row already reports its outcome, so nothing is synthesized.
+    assert!(expected_quota_sources(&routing, &source_configuration(true, true, true)).is_empty());
+    // A candidate that never opted into quota has no allowance expectation.
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "vibe".to_string(),
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    assert!(expected_quota_sources(&routing, &source_configuration(false, true, true)).is_empty());
+}
+
+/// Named sources own their candidate's readings and refresh through their
+/// own credential lifecycle; an ambient expectation must not appear for
+/// them.
+#[test]
+fn credential_bound_candidates_expect_no_ambient_source() {
+    let mut routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "vibe".to_string(),
+            quota_pool: Some("vibe-monthly".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    routing
+        .quota_sources
+        .insert("vibe-monthly".to_string(), "mistral-console".to_string());
+    assert!(
+        expected_quota_sources(&routing, &source_configuration(false, true, true)).is_empty(),
+        "a named quota source owns the readings"
+    );
+}
+
+#[test]
+fn a_nous_portal_candidate_without_credentials_expects_the_portal_source() {
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "opencode".to_string(),
+            model: Some("nous-portal/deepseek/deepseek-v4".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    let expected = expected_quota_sources(&routing, &source_configuration(true, true, false));
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].backend, "opencode");
+    assert_eq!(
+        expected[0].backend_instance.as_deref(),
+        Some("opencode:nous-portal-api")
+    );
+    assert_eq!(expected[0].provider.as_deref(), Some("nous"));
+
+    // A non-Nous opencode candidate expects nothing.
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "opencode".to_string(),
+            model: Some("glm-5".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    assert!(expected_quota_sources(&routing, &source_configuration(true, true, false)).is_empty());
+}
+
+// -- #1336: human snapshot output ----------------------------------------
+
+fn check(backend: &str, status: QuotaCheckStatus) -> QuotaCheck {
+    QuotaCheck {
+        backend: backend.to_string(),
+        credential_id: None,
+        provider: None,
+        backend_instance: None,
+        model: None,
+        quota_pool: None,
+        checked_at: None,
+        status,
+        quota_observations: Vec::new(),
+        error: None,
+        failing_since: None,
+    }
+}
+
+#[test]
+fn snapshot_lines_label_needs_login_not_configured_and_failing_since() {
+    let mut auth = check("claude", QuotaCheckStatus::AuthRequired);
+    auth.backend_instance = Some("claude".to_string());
+    auth.checked_at = Some("2026-10-04T08:30:00Z".to_string());
+    auth.failing_since = Some("2026-10-02T08:00:00Z".to_string());
+    auth.error =
+        Some("auth_required: Claude OAuth login expired; run claude auth login".to_string());
+    assert_eq!(
+        format_check_line(&auth),
+        "  - claude: needs login (failing since 2026-10-02T08:00:00Z): auth_required: Claude OAuth login expired; run claude auth login"
+    );
+
+    let missing = check("vibe", QuotaCheckStatus::NotConfigured);
+    assert_eq!(format_check_line(&missing), "  - vibe: not configured");
+
+    let ok = check("codex", QuotaCheckStatus::Data);
+    let mut ok = ok;
+    ok.checked_at = Some("2026-10-04T08:30:00Z".to_string());
+    assert_eq!(
+        format_check_line(&ok),
+        "  - codex: ok (checked 2026-10-04T08:30:00Z)"
+    );
+}
+
+#[test]
+fn snapshot_check_lines_keep_credential_instance_pool_and_model_distinct() {
+    let mut named = check("opencode", QuotaCheckStatus::NotConfigured);
+    named.credential_id = Some("mistral-console".to_string());
+    named.backend_instance = Some("opencode:nous-portal-api".to_string());
+    named.quota_pool = Some("nous-portal-api".to_string());
+    named.model = Some("nous-portal/deepseek/deepseek-v4".to_string());
+    assert_eq!(
+        check_source_label(&named),
+        "opencode / credential mistral-console / opencode:nous-portal-api / pool nous-portal-api / model nous-portal/deepseek/deepseek-v4"
+    );
+}
+
 use crate::availability::{BlockScope, Reason, ScopeStatus, Source};
 use crate::config::tests::test_profile_for_notifications;
 
@@ -30,6 +193,7 @@ use crate::config::tests::test_profile_for_notifications;
 /// that module's own fixture convention.
 fn empty_group() -> ledger::summary::GroupSummary {
     ledger::summary::GroupSummary {
+        usage_unknown_reasons: Default::default(),
         group_key: "g".to_string(),
         entries: 0,
         attempts: 0,
@@ -79,7 +243,6 @@ fn group_obs(
         model: model.map(str::to_string),
         quota_pool: None,
         quota_window: Some(window.to_string()),
-        quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: Some(observed_at.to_string()),
@@ -104,7 +267,6 @@ fn account_record(
         model: model.map(str::to_string),
         quota_pool: None,
         quota_window: Some(window.to_string()),
-        quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: Some(observed_at.to_string()),
@@ -326,6 +488,50 @@ fn aggregate_observations_combines_backend_and_model_group_observations() {
         .iter()
         .any(|o| o.quota_window.as_deref() == Some("weekly")));
     assert!(obs.iter().any(|o| o.quota_window.as_deref() == Some("5h")));
+}
+
+#[test]
+fn aggregate_observations_scrubs_group_identity_but_preserves_account_records() {
+    let mut record = group_obs("codex", None, "weekly", Some(42.0), "2026-07-03T00:00:00Z");
+    record.backend_instance = Some("codex".into());
+    record.quota_pool = Some("account-pool".into());
+    record.credential_id = Some("account-credential".into());
+    record.account_usage = Some(
+        serde_json::from_value(serde_json::json!({
+            "account_id": "account", "workspace_id": null,
+            "period_start": "2026-07-01T00:00:00Z",
+            "period_end": "2026-08-01T00:00:00Z", "currency": "USD", "models": []
+        }))
+        .unwrap(),
+    );
+    let group = ledger::summary::GroupSummary {
+        quota_observations: vec![record.clone()],
+        ..empty_group()
+    };
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "codex",
+        None::<String>,
+        Some("account-pool"),
+    );
+    let mut account = record.clone();
+    account.backend_instance = Some(identity.backend_instance.clone());
+    for (backend, model) in [(Some(&group), None), (None, Some(&group))] {
+        let observations =
+            aggregate_observations(backend, model, std::slice::from_ref(&account), &identity);
+        assert_eq!(observations.len(), 2);
+        let broad = &observations[0];
+        assert!(broad.backend_instance.is_none());
+        assert!(broad.quota_pool.is_none());
+        assert!(broad.credential_id.is_none());
+        assert!(broad.account_usage.is_none());
+        assert_eq!(broad.quota_remaining_percent, Some(42.0));
+        assert_eq!(broad.observed_at, record.observed_at);
+        assert_eq!(
+            serde_json::to_value(&observations[1]).unwrap(),
+            serde_json::to_value(&account).unwrap()
+        );
+        assert!(group.quota_observations[0].credential_id.is_some());
+    }
 }
 
 #[test]
@@ -649,6 +855,36 @@ fn build_candidates_falls_back_to_default_backend_when_none_configured() {
 }
 
 #[test]
+fn build_candidates_lists_allow_list_entries_under_their_job_kind() {
+    let routing = RoutingPolicy {
+        default_backend: Some("vibe".to_string()),
+        allowed_models: [(
+            "review".to_string(),
+            vec![CandidateConfig {
+                backend: "claude".to_string(),
+                model: Some("opus".to_string()),
+                ..CandidateConfig::default()
+            }],
+        )]
+        .into(),
+        ..RoutingPolicy::default()
+    };
+    let profile = test_profile_for_notifications();
+    let candidates = build_candidates(
+        &routing,
+        &profile,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].backend, "claude");
+    assert_eq!(candidates[0].modes, vec!["review"]);
+}
+
+#[test]
 fn build_candidates_keeps_distinct_quota_pools_separately_scoped() {
     // Two candidates sharing a backend but different quota_pool must not
     // share eligibility -- one being blocked must not leak onto the other.
@@ -855,4 +1091,25 @@ fn build_candidates_creates_four_distinct_agy_scopes() {
             Some("agy-second:external".to_string()),
         ]
     );
+}
+
+#[test]
+fn quota_usage_counts_each_unknown_reason_separately() {
+    use ledger::UsageUnknownReason::*;
+    let reasons = [
+        NoAttemptStarted,
+        BackendNotInvoked,
+        UsageArtifactMissing,
+        UsageArtifactUnparsed,
+    ];
+    let mut group = empty_group();
+    group.usage_unknown_reasons = reasons.into_iter().map(|reason| (reason, 1)).collect();
+    let candidate = aggregate_usage(Some(&group), None);
+    assert_eq!(candidate.usage_unknown_reasons, group.usage_unknown_reasons);
+    let total = summarize_groups(vec![group.clone(), group]);
+    for reason in reasons {
+        assert_eq!(total.usage_unknown_reasons[&reason], 2);
+    }
+    assert_eq!(total.total_tokens, None);
+    assert_eq!(total.requests_count, None);
 }

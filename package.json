@@ -1,6 +1,6 @@
 {
   "name": "git-agent-harness",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,18 +11,17 @@
     "dev:desktop": "node scripts/dev-runner.js dev:desktop",
     "start": "node apps/server/dist/bin.js",
     "start:desktop": "cd apps/desktop && npm run start",
-    "build": "npm run build:rust && npm run build:contracts && npm run build:shared && npm run build:server && npm run build:web && npm run build:mcp-server",
+    "build": "npm run build:rust && npm run build:contracts && npm run build:shared && npm run build:server && npm run build:web",
     "build:rust": "cargo build --release",
     "build:contracts": "npm run --workspace=packages/contracts build",
     "build:shared": "npm run --workspace=packages/shared build",
     "build:server": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server build",
-    "build:mcp-server": "npm run --workspace=apps/mcp-server build",
     "prebuild:web": "npm run test:server",
     "build:web": "npm run --workspace=apps/web build",
     "build:all": "npm run build && npm run build:desktop",
     "build:desktop": "npm run --workspace=apps/desktop build",
     "test:server": "npm run --workspace=apps/server test",
-    "typecheck": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server typecheck && npm run --workspace=apps/server typecheck:mock && npm run --workspace=apps/web typecheck && npm run --workspace=apps/mcp-server typecheck",
+    "typecheck": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server typecheck && npm run --workspace=apps/server typecheck:mock && npm run --workspace=apps/web typecheck",
     "clean": "rm -rf apps/*/node_modules apps/*/dist packages/*/dist"
   },
   "devDependencies": {
