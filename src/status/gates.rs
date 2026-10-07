@@ -305,6 +305,74 @@ default_target_branch = "main"
     }
 
     #[test]
+    fn repeated_setup_status_blocker_only_holds_ticket_selection() {
+        use crate::test_support::{AvailabilityEnvGuard, ClaimStateEnvGuard, ExecGuard, PathGuard};
+        use std::os::unix::fs::PermissionsExt;
+
+        let _exec_guard = ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = make_test_cfg(&tmp);
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+        fs::write(
+            repo.join("docs/tickets/TICKET-1462-test.md"),
+            "# TICKET-1462: Test\n\nGoal: test\n",
+        )
+        .unwrap();
+        cfg.profiles.get_mut("test").unwrap().local_path = repo.display().to_string();
+        let profile = &cfg.profiles["test"];
+        let mut entry = LedgerEntry::new("test", profile, "auto", "fix", "TICKET-1462", None, None);
+        entry.work_id = Some("TICKET-1462".into());
+        entry.branch = Some("gah/fix-1462".into());
+        entry.set_failure(
+            ledger::FailureClass::HarnessError,
+            ledger::FailureStage::Dispatch,
+        );
+        entry.error_summary = Some("setup failed".into());
+        for _ in 0..3 {
+            ledger::append(&cfg, &entry).unwrap();
+        }
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let gh = bin.join("gh");
+        let _path = PathGuard::set(&bin);
+        let _availability = AvailabilityEnvGuard::set(tmp.path().join("availability.json"));
+        let _claims = ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
+        for active_mr in [false, true] {
+            let prs = if active_mr {
+                r#"[{"number":1,"title":"TICKET-1462: Test","html_url":"https://example/pr/1","state":"open","draft":true,"head":{"ref":"gah/fix-1462"}}]"#
+            } else {
+                "[]"
+            };
+            fs::write(
+                &gh,
+                format!(
+                    "#!/bin/sh\ncase \"$*\" in\n  *'/pulls?'*) printf '%s\\n' '{prs}' ;;\n  *) printf '%s\\n' '[]' ;;\nesac\n"
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+            let snapshot =
+                super::super::build_snapshot(&cfg, "test", time::OffsetDateTime::now_utc())
+                    .unwrap();
+            assert_eq!(snapshot.observations.sync.status, "ok");
+            let ticket = snapshot
+                .available_tickets
+                .iter()
+                .find(|ticket| ticket.work_id.as_deref() == Some("TICKET-1462"))
+                .expect("ticket must be scanned");
+            assert!(ticket.human_required);
+            assert_eq!(ticket.has_active_mr, active_mr);
+            assert_eq!(
+                snapshot.blocked_work_items.iter().any(|blocker| {
+                    blocker.reason_code.as_deref() == Some("repeated_setup_failure")
+                }),
+                !active_mr,
+            );
+        }
+    }
+
+    #[test]
     fn repeated_setup_blocker_gets_exact_derived_reason() {
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);

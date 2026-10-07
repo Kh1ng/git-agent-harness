@@ -783,6 +783,12 @@ fn build_snapshot_inner(
     // human_required state has since cleared are no longer shown as blocked.
     for ticket in &available_tickets {
         if ticket.human_required {
+            if ticket.has_active_mr
+                && ticket.human_required_reason_code.as_deref()
+                    == Some(HumanRequiredReason::RepeatedSetupFailure.as_str())
+            {
+                continue;
+            }
             let reason_code = ticket.human_required_reason_code.clone();
             blocked_work_items.push(Blocker {
                 kind: "human_required".into(),

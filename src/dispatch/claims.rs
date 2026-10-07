@@ -432,7 +432,37 @@ impl AvailableTicket {
     }
 }
 
+/// Dispatch refusals that clear on their own: the node was busy, every
+/// backend was out of quota, or the loop was stopping. They are recorded as
+/// `harness_error` at the dispatch stage like a real setup failure, and the
+/// ledger carries no structured marker for them, so they are recognised by
+/// the text the controller writes.
+const TRANSIENT_DISPATCH_REFUSALS: [&str; 4] = [
+    "node admission deferred",
+    "capacity deferred",
+    "no eligible backend available",
+    "shutdown requested",
+];
+
+/// Entries the repeated-setup check skips: they neither count toward the
+/// streak nor reset it. Shutdown cancellations and agent-run failures are
+/// interrupted execution, and transient dispatch refusals need no human.
+fn ignored_by_repeated_setup(entry: &LedgerEntry) -> bool {
+    entry.validation_result.as_deref() == Some("cancelled_shutdown")
+        || entry.failure_stage.as_deref() == Some(crate::ledger::FailureStage::AgentRun.as_str())
+        || entry.error_summary.as_deref().is_some_and(|summary| {
+            TRANSIENT_DISPATCH_REFUSALS
+                .iter()
+                .any(|marker| summary.contains(marker))
+        })
+}
+
 fn repeated_setup_reason(attempts: &[&LedgerEntry]) -> Option<String> {
+    let attempts: Vec<_> = attempts
+        .iter()
+        .copied()
+        .filter(|entry| !ignored_by_repeated_setup(entry))
+        .collect();
     let start = attempts.len().checked_sub(REPEATED_SETUP_FAILURE_LIMIT)?;
     let recent = &attempts[start..];
     let last = *recent.last()?;

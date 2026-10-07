@@ -143,3 +143,50 @@ fn controls_are_ignored_reset_clears_and_existing_gate_wins() {
     )
     .is_none());
 }
+
+#[test]
+fn interrupted_execution_is_ignored_without_resetting_setup_streak() {
+    let setup = failure("setup failed");
+    let mut shutdown = setup.clone();
+    shutdown.validation_result = Some("cancelled_shutdown".into());
+    let mut abandoned = setup.clone();
+    abandoned.mode = "abandoned".into();
+    abandoned.validation_result = Some("not_run_abandoned".into());
+    abandoned.failure_stage = Some(crate::ledger::FailureStage::AgentRun.as_str().into());
+    abandoned.error_summary =
+        Some("dispatch abandoned before terminal telemetry was persisted".into());
+    for ignored in [shutdown, abandoned] {
+        assert!(!lookup(&vec![ignored.clone(); 3]).4);
+        assert!(lookup(&[setup.clone(), setup.clone(), ignored, setup.clone()]).4);
+    }
+}
+
+#[test]
+fn identical_non_setup_failure_classes_do_not_gate() {
+    for class in ["backend_error", "unknown"] {
+        let mut entry = failure("same failure");
+        entry.failure_class = Some(class.into());
+        assert!(!lookup(&vec![entry; 3]).4, "{class}");
+    }
+}
+
+/// Summaries copied from real ledger rows: each is recorded as
+/// `harness_error` at the dispatch stage, and each clears without a human.
+#[test]
+fn transient_dispatch_refusals_never_gate() {
+    let setup = failure("insufficient free space on temporary filesystem (/tmp): 9 GiB available");
+    for summary in [
+        "node admission deferred: node CPU reserve would be crossed (load 11.20 + 2.00 > 10.80)",
+        "node admission deferred: node memory PSI is saturated (12.50% full avg10)",
+        "fallback capacity deferred after 1 backend attempt(s): node admission deferred",
+        "no eligible backend available for preferred codex/gpt-5; skipped 3 candidates",
+        "shutdown requested before node admission",
+    ] {
+        let refusal = failure(summary);
+        assert!(!lookup(&vec![refusal.clone(); 3]).4, "{summary}");
+        assert!(
+            lookup(&[setup.clone(), setup.clone(), refusal, setup.clone()]).4,
+            "a refusal must not reset the streak: {summary}"
+        );
+    }
+}
