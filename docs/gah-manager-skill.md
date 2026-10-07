@@ -88,12 +88,17 @@ Hand the job to one headless worker and let it finish. Two ways, each with a cos
 
 - `gah dispatch --profile <name> --mode fix --target <job file> --retries 0`. Isolated worktree,
   routing from the job's metadata, the profile's validation. Costs: it opens a draft pull request
-  as soon as its own validation passes, before your gate; it holds a claim on the work id for six
-  hours, which blocks your own retry through the same path; it files the run under `TICKET-n`;
-  and its sandbox has no network, so a job that adds an npm package cannot install it.
+  as soon as its own validation passes, before your gate; a run in flight holds a claim on the
+  work id (before #1461 a finished run kept it for six hours, which blocked the trial's own retry
+  on #1342); it files the run under `TICKET-n`, so count attempts per issue under that id too;
+  and the Codex sandbox has no network, so a job that adds an npm package cannot install it. You
+  update the lockfile and run `npm install` before the gate.
 - A direct worker run (`codex exec`, `claude -p`, or the backend's headless mode) in a lane you
   prepared, on a branch cut from the profile's target branch. No claim, no early pull request,
   `node_modules` already present. You log the run yourself.
+
+The trial settled on direct runs after its first two issues. Use `gah dispatch` when you want its
+worktree and routing and can live with the costs.
 
 Never run two workers on the same issue at once. Resolve the target branch from the profile
 (`gah profile show <name>`); do not assume `main`.
@@ -133,8 +138,8 @@ owner's word, written.
 
 After the gate passes, you commit the worker's tree (one commit, a message that says what changed
 and why), push the branch, and open a draft pull request, or rewrite the one `gah dispatch`
-opened. "Closes #n" only when the whole issue is done; "Part of #n" for a slice. No model names
-anywhere in the commit or the pull request.
+opened. "Closes #n" only when the whole issue is done; "Part of #n" for a slice. Follow the
+repository's conventions for the commit and the pull request body.
 
 ### 8. Independent review before merge
 
@@ -156,9 +161,9 @@ remove the `managed` label.
 
 ## Budget per issue
 
-Three counters, all cumulative across tiers: worker attempts, elapsed time, and manager rounds,
-where research, supervision and review all count as rounds. The trial's tier-2 allowance was two
-worker attempts, ninety minutes and three manager rounds. Each step up the ladder carries a
+Three counters, all cumulative across tiers: worker attempts, elapsed time, and manager rounds. A
+round is one manager pass: research, a gate, or a review follow-up; all three count. The trial's
+tier-2 allowance was two worker attempts, ninety minutes and three manager rounds. Each step up the ladder carries a
 reserve of about one third of the allowance; it is spent only when the gate measured progress at
 the lower tier (fewer failing checks, a smaller diff to go). Spent budget is a hold, not a reason
 to try harder.
@@ -192,9 +197,13 @@ in place of a job file.
 
 ## What the app enforces, and what is still yours
 
-In the app today: the managed state (label or foreign assignee; loop intake, Assign button and
-dispatch API respect it), a dispatch that keeps its claim only until it has recorded how it ended,
-and a hold after the same setup failure three times in a row.
+In the app today: a dispatch that keeps its claim only until it has recorded how it ended (#1461),
+and a hold after the same setup failure three times in a row (#1463). Once #1470 merges: the
+managed state. An issue with the `managed` label, or on a profile with local issue claims an
+assignee other than the loop's login, is rejected by loop intake with the reason code `managed`,
+the dashboard's Assign button is off for it, and the dispatch API refuses a fix or improve job on
+it. With `issue_claim.mode = "github_assignee"` the assignee is a claim, so only the label marks
+an issue managed there.
 
 Still yours to do by hand until they land, in this order: running a job file's own checks inside
 `gah dispatch` and refusing changes outside its allowed files, with the event log as an app
