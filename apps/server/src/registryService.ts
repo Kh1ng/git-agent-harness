@@ -548,6 +548,10 @@ export class RegistryService {
     const nodes = this.getNodes();
     const observations = await mapWithConcurrency(nodes, NODE_POLL_CONCURRENCY, async (node) => {
       const result = await this.pollNodeObservation(node, profile);
+      if (!profile && this.nodes.get(node.node_id) === node) {
+        const cached = this.observations.get(node.node_id);
+        if (cached) return cached;
+      }
       return result.snapshot ?? emptyNodeObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at ?? null, result.error ?? null);
     });
     if (!profile) this.changed();
@@ -613,7 +617,9 @@ export class RegistryService {
   private async pollNodeObservation(node: RegisteredNode, profile?: string): Promise<NodeHealthCheckResult> {
     const sequence = (this.observationRequests.get(node.node_id) ?? 0) + 1;
     this.observationRequests.set(node.node_id, sequence);
-    const result = await this.fetchNodeObservation(node, profile);
+    const profiles = profile ? [profile] : [...new Set(node.profiles?.length ? node.profiles : [undefined])];
+    const results = await mapWithConcurrency(profiles, NODE_POLL_CONCURRENCY, requested => this.fetchNodeObservation(node, requested));
+    const result = results[0];
     // Publish only the newest request for this registration. A slow poll must
     // not undo a newer health check or restore a revoked/repointed node.
     if (this.nodes.get(node.node_id) === node && this.observationRequests.get(node.node_id) === sequence) {
@@ -621,7 +627,23 @@ export class RegistryService {
       // A scoped dispatch must not replace the fleet-wide observation.
       if (!profile) {
         const observation = result.snapshot ?? emptyNodeObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at, result.error);
-        if (!result.snapshot) observation.running_workers = (this.observations.get(node.node_id)?.running_workers ?? []).map(worker => ({ ...worker, state: 'stale' }));
+        const previous = this.observations.get(node.node_id);
+        if (!result.snapshot) observation.profile = previous?.profile ?? null;
+        // Health and capacity still describe the primary profile. Worker rows
+        // carry their own profile and freshness, including partial outages.
+        observation.running_workers = results.flatMap((reading, index) => {
+          const requested = profiles[index];
+          if (reading.snapshot && (!requested || reading.snapshot.profile === requested)) {
+            return (reading.snapshot.running_workers ?? []).map(worker => ({
+              ...worker,
+              profile: reading.snapshot!.profile ?? undefined,
+              state: reading.state === 'healthy' ? worker.state : 'stale' as const,
+            }));
+          }
+          return (previous?.running_workers ?? [])
+            .filter(worker => (worker.profile ?? previous?.profile) === (requested ?? previous?.profile))
+            .map(worker => ({ ...worker, profile: worker.profile ?? previous?.profile ?? undefined, state: 'stale' as const }));
+        });
         this.observations.set(node.node_id, observation);
       }
     }

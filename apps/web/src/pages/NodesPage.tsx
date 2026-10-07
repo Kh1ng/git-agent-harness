@@ -364,7 +364,7 @@ export function NodesPage() {
       <h4 className="font-medium text-primary">Observed running workers</h4>
       <p className="text-sm text-secondary">{observationLabel(observation)} · observed {age(observation?.observed_at)}</p>
       <a href={`?page=work${observation?.profile ? `&profile=${encodeURIComponent(observation.profile)}` : ''}#running-workers`} className="text-accent">Open worker roster</a>
-      {(observation?.running_workers ?? []).map(worker => <p className="text-sm break-words" key={`${worker.run_id}:${worker.attempt}`}>{worker.work_id ?? 'Unknown work'} · {worker.state} · {worker.runner} · {worker.model ?? 'Unknown model'}</p>)}
+      {(observation?.running_workers ?? []).map(worker => <p className="text-sm break-words" key={`${worker.profile}:${worker.run_id}:${worker.attempt}`}><a className="text-accent" href={`?page=work&profile=${encodeURIComponent(worker.profile ?? observation?.profile ?? '')}#running-workers`}>{worker.work_id ?? 'Unknown work'}</a> · {worker.state} · {worker.runner} · {worker.model ?? 'Unknown model'}</p>)}
       <h4 className="font-medium text-primary">Central leases</h4>
       {leases.length === 0 ? <p className="text-sm text-secondary">No active central leases at the last refresh.</p>
         : <ul className="space-y-2 text-sm text-primary">{leases.map((lease) => <li key={`${lease.profile}:${lease.work_id}`}>{lease.profile} / {lease.work_id} · renewed {age(lease.renewed_at)} · expires {new Date(lease.expires_at).toLocaleString()}</li>)}</ul>}

@@ -6,6 +6,14 @@ use std::{
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+/// Runtime liveness reported by the roster; serialized values match the wire contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerState {
+    Running,
+    Stale,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RunningWorker {
     pub profile: String,
@@ -25,7 +33,7 @@ pub struct RunningWorker {
     pub attempt: u32,
     pub last_activity_at: String,
     pub stale_after_seconds: u64,
-    pub state: String,
+    pub state: WorkerState,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,7 +154,7 @@ impl InvocationGuard {
             attempt,
             last_activity_at: now,
             stale_after_seconds,
-            state: "running".into(),
+            state: WorkerState::Running,
         };
         let path = session.join("running-worker.json");
         let temporary = path.with_extension("json.tmp");
@@ -215,11 +223,10 @@ pub fn observe(root: &Path, now: OffsetDateTime) -> Vec<RunningWorker> {
                 row.state = if owner_gone
                     || (now - last).whole_seconds() >= row.stale_after_seconds as i64
                 {
-                    "stale"
+                    WorkerState::Stale
                 } else {
-                    "running"
-                }
-                .into();
+                    WorkerState::Running
+                };
                 rows.push(row);
             }
         }
@@ -299,10 +306,11 @@ mod tests {
         assert_eq!(value["requested_model"], "requested");
         assert!(value["actual_model"].is_null());
         assert_eq!(value["attempt"], 2);
-        assert_eq!(rows[0].state, "running");
+        assert_eq!(value["state"], "running");
+        assert_eq!(rows[0].state, WorkerState::Running);
         assert_eq!(
             observe(temp.path(), now + time::Duration::seconds(901))[0].state,
-            "stale"
+            WorkerState::Stale
         );
         // A fresh output write renews activity without status reads doing so.
         let mut aged = rows[0].clone();
@@ -320,11 +328,11 @@ mod tests {
             .unwrap()
             .set_modified((now - time::Duration::seconds(901)).into())
             .unwrap();
-        assert_eq!(observe(temp.path(), now)[0].state, "stale");
+        assert_eq!(observe(temp.path(), now)[0].state, WorkerState::Stale);
         heartbeat(&session);
         assert_eq!(
             observe(temp.path(), OffsetDateTime::now_utc())[0].state,
-            "running"
+            WorkerState::Running
         );
         assert!(observe(temp.path(), now + time::Duration::days(2)).is_empty());
         let mut dead = serde_json::to_value(&aged).unwrap();
@@ -339,10 +347,10 @@ mod tests {
             let crashed = observe(temp.path(), now);
             assert_eq!(crashed.len(), 1);
             assert_eq!(crashed[0].run_id, "run");
-            assert_eq!(crashed[0].state, "stale");
+            assert_eq!(crashed[0].state, WorkerState::Stale);
             assert_eq!(
                 observe(temp.path(), now + time::Duration::seconds(901))[0].state,
-                "stale"
+                WorkerState::Stale
             );
             assert!(observe(temp.path(), now + time::Duration::days(2)).is_empty());
         }
@@ -354,7 +362,7 @@ mod tests {
         fs::write(session.join("backend-output.log"), "Agent output").unwrap();
         assert_eq!(
             observe(temp.path(), OffsetDateTime::now_utc())[0].state,
-            "running"
+            WorkerState::Running
         );
 
         drop(guard);

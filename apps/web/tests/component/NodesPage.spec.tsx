@@ -110,6 +110,7 @@ test('fleet lists unknown, stale and classified health; click checks health and 
   await expect(detail.getByText(/Last manual check: healthy/)).toBeVisible();
   await expect(detail.getByText('http://192.168.1.20:3773')).toBeVisible();
   await expect(detail.getByText(/#946 · running · codex · routed/)).toBeVisible();
+  await expect(detail.getByRole('link', { name: '#946', exact: true })).toHaveAttribute('href', '?page=work&profile=gah#running-workers');
   await expect(detail.getByText(/gah \/ #946 · renewed/)).toBeVisible();
   expect(healthChecks).toBe(1);
   await expect.poll(() => requests).toBe(2);

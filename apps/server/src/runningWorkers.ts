@@ -4,9 +4,11 @@ import type { NodeObservationSnapshot, RunningWorker, StatusSnapshot } from '@gi
 export function runningWorkers(status: StatusSnapshot, nodes: NodeObservationSnapshot[], nodeId: string, now = Date.now()): RunningWorker[] {
   const rows = (status.running_workers ?? []).map(worker => ({ ...worker, node_id: nodeId }));
   for (const node of nodes) {
-    if (node.node_id === nodeId || node.profile !== status.profile.profile) continue;
-    rows.push(...(node.running_workers ?? []).map(worker => ({ ...worker, node_id: node.node_id,
-      state: node.state === 'healthy' ? worker.state : 'stale' as const })));
+    if (node.node_id === nodeId) continue;
+    rows.push(...(node.running_workers ?? [])
+      .filter(worker => (worker.profile ?? node.profile) === status.profile.profile)
+      .map(worker => ({ ...worker, node_id: node.node_id,
+        state: worker.profile || node.state === 'healthy' ? worker.state : 'stale' as const })));
   }
   const unique = new Map<string, RunningWorker>();
   for (const row of rows) {
