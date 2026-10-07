@@ -443,8 +443,8 @@ pub(super) fn run_backend_with_reserved_route(
     // scoped target directory. Cargo safely serializes concurrent builds in a
     // shared target dir, while separate worktree-local `target/` directories
     // otherwise multiply multi-gigabyte artifacts until the host fills.
-    // Use the complete ScopedCargoTarget environment (CARGO_TARGET_DIR and RUSTC_WRAPPER)
-    // to ensure sccache is used when available.
+    // The complete ScopedCargoTarget environment (CARGO_TARGET_DIR and RUSTC_WRAPPER) so
+    // sccache is used when available; sandboxed Codex runs drop the wrapper (#1464).
     env_vars.extend(cargo_target.environment());
     apply_execution_identity_env(profile, identity, &mut env_vars)?;
     execution_env::authorize_identity(cfg, profile_name, profile, work_id, identity)?;
