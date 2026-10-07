@@ -1,0 +1,288 @@
+name: Release — Edge channel
+
+# Issue #1416: a green merge to main publishes a versioned build through a
+# prerelease "edge" channel, so no tag is needed for every merge and every
+# GAH surface (central, workers, the desktop app) can show "Update
+# available" against the same artifacts. The moving prerelease tag `edge`
+# is deleted and recreated per publish; the versioned truth lives in the
+# edge-manifest.json asset (product version + commit + SHA-256 per asset).
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-edge
+  cancel-in-progress: true
+
+jobs:
+  cli-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Check release version
+        run: node scripts/check-release-version.mjs
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Build CLI and MCP server
+        run: |
+          cargo build --release --bin gah --bin gah-mcp-server
+          cp target/release/gah gah-linux-x86_64
+          cp target/release/gah-mcp-server gah-mcp-server-linux-x86_64
+          chmod +x gah-linux-x86_64 gah-mcp-server-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edge-cli-linux
+          path: |
+            gah-linux-x86_64
+            gah-mcp-server-linux-x86_64
+          if-no-files-found: error
+
+  cli-macos:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Check release version
+        run: node scripts/check-release-version.mjs
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+      - name: Build CLI and MCP server (universal)
+        run: |
+          cargo build --release --bin gah --bin gah-mcp-server --target aarch64-apple-darwin
+          cargo build --release --bin gah --bin gah-mcp-server --target x86_64-apple-darwin
+          for bin in gah gah-mcp-server; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin" \
+              -output "$bin-macos-universal"
+          done
+          chmod +x gah-macos-universal gah-mcp-server-macos-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edge-cli-macos
+          path: |
+            gah-macos-universal
+            gah-mcp-server-macos-universal
+          if-no-files-found: error
+
+  server-bundle:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Check release version
+        run: node scripts/check-release-version.mjs
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies and build workspace outputs
+        run: |
+          npm ci
+          npm run build:server
+          npm run build:web
+      - name: Test the bundle script
+        run: node --test scripts/build-release-bundle.test.mjs
+      - name: Archive the release bundle
+        run: bash scripts/build-release-bundle.sh gah-server-bundle.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edge-server-bundle
+          path: gah-server-bundle.tar.gz
+          if-no-files-found: error
+
+  # The desktop updater feed is only produced when the deployment's minisign
+  # signing key is configured (TAURI_SIGNING_PRIVATE_KEY); without it the
+  # desktop app reports "updater not configured" and the edge release still
+  # ships CLI + server artifacts.
+  updater-key-gate:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      has_key: ${{ steps.gate.outputs.has_key }}
+    steps:
+      - id: gate
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: echo "has_key=$([ -n "$SIGNING_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  desktop-updater:
+    needs: updater-key-gate
+    if: needs.updater-key-gate.outputs.has_key == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            os_name: macos
+            platform_keys: '["darwin-aarch64", "darwin-x86_64"]'
+            bundle_glob: target/release/bundle/macos/*.app.tar.gz
+          - os: ubuntu-22.04
+            os_name: linux
+            platform_keys: '["linux-x86_64"]'
+            bundle_glob: target/release/bundle/appimage/*.AppImage
+          - os: windows-latest
+            os_name: windows
+            platform_keys: '["windows-x86_64"]'
+            bundle_glob: target/release/bundle/nsis/*-setup.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Check release version
+        run: node scripts/check-release-version.mjs
+        working-directory: .
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/desktop
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: .
+      - name: Build desktop updater artifacts (signed)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # createUpdaterArtifacts stays out of tauri.conf.json (it would
+          # break every build without the signing key); merge it in here.
+          echo '{"bundle":{"createUpdaterArtifacts":true}}' > updater.conf.json
+          npx vite build
+          npx tauri build --config updater.conf.json
+      - name: Stage updater fragment
+        shell: bash
+        env:
+          PLATFORM_KEYS: ${{ matrix.platform_keys }}
+          OS_NAME: ${{ matrix.os_name }}
+        run: |
+          mkdir -p updater-stage
+          artifact=$(ls ${{ matrix.bundle_glob }} | head -n 1)
+          [ -n "$artifact" ] || { echo "no updater bundle matched ${{ matrix.bundle_glob }}" >&2; exit 1; }
+          cp "$artifact" updater-stage/
+          cp "$artifact.sig" updater-stage/ || { echo "missing signature for $artifact" >&2; exit 1; }
+          OS_NAME="$OS_NAME" PLATFORM_KEYS="$PLATFORM_KEYS" node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const stage = fs.readdirSync("updater-stage");
+            const bundle = stage.find((name) => !name.endsWith(".sig"));
+            const signature = fs.readFileSync(path.join("updater-stage", bundle + ".sig"), "utf8").trim();
+            fs.writeFileSync(
+              path.join("updater-stage", `fragment-${process.env.OS_NAME}.json`),
+              JSON.stringify({
+                platform_keys: JSON.parse(process.env.PLATFORM_KEYS),
+                asset_name: bundle,
+                signature
+              }, null, 2)
+            );
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: edge-desktop-updater-${{ matrix.os_name }}
+          path: apps/desktop/updater-stage
+          if-no-files-found: error
+
+  publish:
+    needs: [cli-linux, cli-macos, server-bundle, desktop-updater]
+    # desktop-updater is skipped when no signing key is configured; the
+    # core artifacts still publish.
+    if: ${{ !cancelled() && needs.cli-linux.result == 'success' && needs.cli-macos.result == 'success' && needs.server-bundle.result == 'success' && (needs.desktop-updater.result == 'success' || needs.desktop-updater.result == 'skipped') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Check release version
+        run: node scripts/check-release-version.mjs
+      - name: Test the compose script
+        run: node --test scripts/compose-edge-manifest.test.mjs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: edge-*
+          merge-multiple: true
+          path: edge
+      - name: Compose edge-manifest.json and latest.json
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          cd edge
+          node ../scripts/compose-edge-manifest.mjs "$HEAD_SHA"
+      - name: Publish the edge prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          cd edge
+          assets=(gah-linux-x86_64 gah-macos-universal gah-mcp-server-linux-x86_64 gah-mcp-server-macos-universal gah-server-bundle.tar.gz edge-manifest.json)
+          for fragment in fragment-*.json; do
+            [ -e "$fragment" ] || continue
+            name="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$fragment','utf8')).asset_name)")"
+            assets+=("$name" "$name.sig")
+          done
+          if [ -f latest.json ]; then assets+=(latest.json); fi
+          # The edge tag moves with every publish: delete and recreate so no
+          # client ever caches a stale asset list under the same tag.
+          gh release delete edge --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          version="$(node -e "console.log(JSON.parse(require('fs').readFileSync('../package.json','utf8')).version)")"
+          # Pin the tag to the built commit; main may have moved since.
+          gh release create edge "${assets[@]}" \
+            --target "$HEAD_SHA" \
+            --prerelease \
+            --title "GAH edge — ${version} ($(echo "$HEAD_SHA" | cut -c1-10))" \
+            --notes "Automatic edge-channel build of main at $HEAD_SHA.
+
+          - edge-manifest.json lists every artifact with its SHA-256; this is what \`gah update --from-release\` installs from.
+          - latest.json is the signed Tauri updater feed for the desktop app (present when the signing key is configured).
+          - Install with: gah update --from-release" \
+            --repo "$GITHUB_REPOSITORY"
+

@@ -26,7 +26,7 @@ pub(in crate::dispatch) fn dry_run(
     println!("From:         origin/{}", profile.default_target_branch);
     println!(
         "Worktree:     {}/{}",
-        cfg.defaults.worktree_base,
+        crate::config::effective_worktree_base(&cfg.defaults).display(),
         branch.replace('/', "-")
     );
     match JobKind::parse(&args.mode) {

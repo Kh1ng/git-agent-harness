@@ -5,7 +5,8 @@ use super::policy::{
     any_available_backend, append_reorder_reason, auto_candidates, builtin_backend,
     configured_route_candidate, configured_route_requires_approval, is_genuine_agent_failure,
     order_candidates, policy_backend_model, policy_candidates, review_fallback_backend,
-    review_fallback_model, same_destination, task_rule_candidates, RouteCandidate,
+    review_fallback_model, route_candidates, same_destination, task_rule_candidates,
+    RouteCandidate,
 };
 use super::reservation::max_concurrent_skip;
 use super::types::{
@@ -23,6 +24,8 @@ use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+#[cfg(test)]
+mod allowed_models_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -190,19 +193,53 @@ where
         backend_available,
     )?;
     if let Some(model) = auto_model_override.filter(|_| !decision.fallback_used) {
+        // The candidate list an allow-listed kind returns IS the allow-list,
+        // so the configured-candidate re-validation below never matches an
+        // off-list model. Gate the swap directly: a kind with an entry only
+        // ever runs on its listed pairs, explicit --model included.
+        if !profile.effective_routing(defaults).allows_model(
+            &mode,
+            &decision.effective_backend,
+            Some(&model),
+        ) {
+            anyhow::bail!(
+                "{}/{} is not in routing.allowed_models for {} jobs on this profile",
+                decision.effective_backend,
+                model,
+                mode
+            );
+        }
         // The requested model may not match any configured candidate at all
-        // (an ad-hoc override unrelated to the routing config) -- that's
-        // fine, nothing gates it. But if it DOES match a configured
-        // candidate for the selected backend, that candidate must pass the
-        // same eligibility checks (availability, already-attempted,
+        // (an ad-hoc override unrelated to the routing config) -- then the
+        // allow-list check above is the only gate. But if it DOES match a
+        // configured candidate for the selected backend, that candidate must
+        // pass the same eligibility checks (availability, already-attempted,
         // requires_approval) every other candidate had to pass, or an
         // explicit --model flag would be a standing bypass of the approval
         // gate this routing layer exists to enforce.
         if decision.effective_model.as_deref() != Some(model.as_str()) {
-            if let Some(candidate) = candidates.iter().find(|candidate| {
-                candidate.backend() == decision.effective_backend
-                    && candidate.model() == Some(model.as_str())
-            }) {
+            // On an allow-listed kind the model may be admitted by an entry
+            // for every model of the backend rather than by the entry that
+            // was selected; that entry's gates apply then.
+            let allow_listed = profile
+                .effective_routing(defaults)
+                .allowed_models_for(&mode)
+                .is_some();
+            let on_backend = || {
+                candidates
+                    .iter()
+                    .filter(|candidate| candidate.backend() == decision.effective_backend)
+            };
+            let gate = on_backend()
+                .find(|candidate| candidate.model() == Some(model.as_str()))
+                .or_else(|| {
+                    on_backend().find(|candidate| {
+                        allow_listed
+                            && candidate.model().is_none()
+                            && decision.effective_model.is_some()
+                    })
+                });
+            if let Some(candidate) = gate {
                 let exclude_attempted = is_genuine_agent_failure(last_failure_class)
                     || !runtime.attempted.is_empty()
                     || !runtime.dispatch_attempted.is_empty();
@@ -304,7 +341,38 @@ where
     let requested_model = req.requested_model.map(str::to_string);
     let effective_routing = profile.effective_routing(defaults);
 
+    // A restriction that cannot be applied as written stops routing: letting
+    // the job run unrestricted is the one outcome the operator ruled out.
+    if let Some(error) = effective_routing.allowed_model_errors().first() {
+        anyhow::bail!("{error}; fix the profile's routing.allowed_models before dispatching");
+    }
+    let allowed_models = effective_routing.allowed_models_for(req.mode);
+
     if req.requested_backend != "auto" {
+        // `--backend codex` with no model runs whatever the profile's
+        // backend args pin, so that is the model the list is asked about.
+        let pinned_model = match req.requested_backend {
+            _ if req.requested_model.is_some() || allowed_models.is_none() => None,
+            "codex" => runner::extract_model_from_backend_args("codex", &profile.codex_args),
+            "opencode" => {
+                runner::extract_model_from_backend_args("opencode", &profile.opencode_args)
+            }
+            "claude" => runner::extract_model_from_backend_args("claude", &profile.claude_args),
+            _ => None,
+        };
+        let requested_model = requested_model.or(pinned_model);
+        if !effective_routing.allows_model(
+            req.mode,
+            req.requested_backend,
+            requested_model.as_deref(),
+        ) {
+            anyhow::bail!(
+                "{}/{} is not in routing.allowed_models for {} jobs on this profile",
+                req.requested_backend,
+                requested_model.as_deref().unwrap_or("default"),
+                req.mode
+            );
+        }
         // No auto_model_override is ever applied on this path (it only
         // triggers for requested_backend == "auto"), so the candidate list
         // is never consulted here.
@@ -322,8 +390,10 @@ where
         .map(|decision| (decision, Vec::new()));
     }
 
+    // An allow-listed job kind routes only within its list, so class-specific
+    // rules and the ordinary pools below do not apply to it.
     if let Some((rule_index, candidates)) = task_rule_candidates(&effective_routing, req.mode, task)
-        .filter(|(_, list)| !list.is_empty())
+        .filter(|(_, list)| !list.is_empty() && allowed_models.is_none())
     {
         let escalate =
             is_genuine_agent_failure(req.last_failure_class) || !runtime.attempted.is_empty();
@@ -385,18 +455,20 @@ where
 
     let mut is_profile_policy = false;
 
-    let candidates =
-        if let Some(c) = policy_candidates(&profile.routing, req.mode).filter(|l| !l.is_empty()) {
-            is_profile_policy = true;
-            Some(c)
-        } else if policy_candidates(&defaults.routing, req.mode)
-            .filter(|l| !l.is_empty())
-            .is_some()
-        {
-            policy_candidates(&effective_routing, req.mode).filter(|l| !l.is_empty())
-        } else {
-            None
-        };
+    let candidates = if let Some(allowed) = allowed_models {
+        Some(route_candidates(&effective_routing, allowed))
+    } else if let Some(c) = policy_candidates(&profile.routing, req.mode).filter(|l| !l.is_empty())
+    {
+        is_profile_policy = true;
+        Some(c)
+    } else if policy_candidates(&defaults.routing, req.mode)
+        .filter(|l| !l.is_empty())
+        .is_some()
+    {
+        policy_candidates(&effective_routing, req.mode).filter(|l| !l.is_empty())
+    } else {
+        None
+    };
 
     if let Some(candidates) = candidates {
         let escalate =
@@ -405,20 +477,31 @@ where
             order_candidates(profile, candidates, escalate, runtime, req.mode);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let candidates_for_diagnostics = candidates.clone();
+        // An allow-listed kind has nowhere else to go. Once every listed
+        // route has been tried it runs them again instead of ending as "no
+        // eligible backend"; a busy, exhausted or unapproved route is still
+        // skipped, and that is what makes the job wait.
+        let every_route_tried = allowed_models.is_some()
+            && candidates.iter().all(|candidate| {
+                let key = CandidateIdentity::from_execution_identity(&candidate.identity);
+                runtime.attempted.contains(&key) || runtime.dispatch_attempted.contains(&key)
+            });
         let (selected, skipped) = pick_route_candidate(
             candidates,
             &evaluation,
             &profile.max_concurrent_per_model,
             backend_available,
             runtime,
-            escalate,
+            escalate && !every_route_tried,
             &profile.effective_routing(defaults),
         )?;
 
         let mut fallback_used = false;
         let mut confidence_impact = None;
         let mut human_required = false;
-        let mut reason = if is_profile_policy {
+        let mut reason = if allowed_models.is_some() {
+            format!("allowed models for {} jobs", req.mode)
+        } else if is_profile_policy {
             "profile routing policy".to_string()
         } else {
             "global routing policy".to_string()

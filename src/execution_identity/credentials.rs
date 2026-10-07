@@ -9,7 +9,7 @@ impl ExecutionIdentity {
             return Ok(Vec::new());
         };
         if self.state_root.is_none() {
-            anyhow::bail!("named API credentials require an isolated instance state_root");
+            anyhow::bail!("named credentials require an isolated instance state_root");
         }
         let source = match crate::credentials::get(id) {
             Ok(value) => value,
@@ -36,6 +36,11 @@ impl ExecutionIdentity {
         {
             anyhow::bail!("administrative credentials cannot run inference");
         }
+        let subscription =
+            source.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken;
+        if subscription && self.runner_kind != "claude" {
+            anyhow::bail!("Claude subscription token requires the Claude runner");
+        }
         let mut env = match crate::credentials::execution_env(id, provider) {
             Ok(value) => value,
             Err(_) => anyhow::bail!("named credential does not match the execution provider"),
@@ -43,6 +48,7 @@ impl ExecutionIdentity {
         // Keep the provider's standard scope name in the approval projection,
         // even when the owner selected an alternate environment variable.
         let standard = match crate::credentials::canonical_provider(&source.provider) {
+            _ if subscription => None,
             "openai" => Some("OPENAI_API_KEY"),
             "anthropic" => Some("ANTHROPIC_API_KEY"),
             "mistral" => Some("MISTRAL_API_KEY"),
@@ -59,7 +65,7 @@ impl ExecutionIdentity {
             }
         }
         let required = match self.runner_kind.as_str() {
-            "claude" => Some("ANTHROPIC_API_KEY"),
+            "claude" if !subscription => Some("ANTHROPIC_API_KEY"),
             "vibe" => Some("MISTRAL_API_KEY"),
             "openhands" => Some("LLM_API_KEY"),
             _ => None,
@@ -122,16 +128,7 @@ impl ExecutionIdentity {
             }
         }
         if self.runner_kind == "claude" && !selected.is_empty() {
-            env.retain(|(name, _)| {
-                (!name.starts_with("ANTHROPIC_") || selected.iter().any(|(key, _)| key == name))
-                    && !name.starts_with("CLAUDE_CODE_OAUTH")
-                    && !matches!(
-                        name.as_str(),
-                        "CLAUDE_CODE_USE_BEDROCK"
-                            | "CLAUDE_CODE_USE_VERTEX"
-                            | "CLAUDE_CODE_USE_FOUNDRY"
-                    )
-            });
+            filter_claude_selected_env(env, &selected);
         }
         if self.runner_kind == "codex" && !selected.is_empty() {
             let key_var = &selected[0].0;
@@ -453,6 +450,18 @@ impl ExecutionIdentity {
     }
 }
 
+fn filter_claude_selected_env(env: &mut Vec<(String, String)>, selected: &[(String, String)]) {
+    env.retain(|(name, _)| {
+        (!name.starts_with("ANTHROPIC_") || selected.iter().any(|(key, _)| key == name))
+            && (!name.starts_with("CLAUDE_CODE_OAUTH")
+                || selected.iter().any(|(key, _)| key == name))
+            && !matches!(
+                name.as_str(),
+                "CLAUDE_CODE_USE_BEDROCK" | "CLAUDE_CODE_USE_VERTEX" | "CLAUDE_CODE_USE_FOUNDRY"
+            )
+    });
+}
+
 /// Native Codex uses TOML CLI overrides; its ACP bridge uses CODEX_CONFIG.
 /// Both refer to the same selected environment variable, never the key itself.
 pub fn selected_codex_config_args(env: &[(String, String)]) -> Vec<String> {
@@ -509,5 +518,23 @@ fn provider_endpoint(provider: &str) -> Option<&'static str> {
         "kimi" => Some("https://api.moonshot.ai/v1"),
         "google" => Some("https://generativelanguage.googleapis.com/v1beta/openai/"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod claude_subscription_tests {
+    use super::*;
+
+    #[test]
+    fn selected_subscription_survives_while_paid_and_ambient_auth_are_removed() {
+        let selected = vec![("CLAUDE_CODE_OAUTH_TOKEN".into(), "private-token".into())];
+        let mut env = vec![
+            ("ANTHROPIC_API_KEY".into(), "paid-key".into()),
+            ("CLAUDE_CODE_OAUTH_TOKEN".into(), "private-token".into()),
+            ("CLAUDE_CODE_OAUTH_REFRESH_TOKEN".into(), "ambient".into()),
+            ("CLAUDE_CODE_USE_BEDROCK".into(), "1".into()),
+        ];
+        filter_claude_selected_env(&mut env, &selected);
+        assert_eq!(env, selected);
     }
 }

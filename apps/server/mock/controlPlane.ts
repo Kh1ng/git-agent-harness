@@ -20,6 +20,10 @@ import type {
   ActivityNotificationPreferences,
   AdminUpdatePendingInfo,
   AdminUpdateState,
+  FleetUpdateResult,
+  NodeSummary,
+  ReleaseChannelStatus,
+  WorkerUpdateStatus,
   ChatNodeInfo,
   ChatIssueStartResult,
   ChatIssueSummary,
@@ -46,6 +50,7 @@ import type {
   ManagerCommandInfo,
   ManagerModelsSummary,
   ProfileSummary,
+  WorkerScalingSettings,
   ProjectImportResult,
   QuotaSnapshot,
   ReportData,
@@ -197,6 +202,8 @@ interface MockState {
   skillObservations: Record<string, { id: string; version: string }[]>;
   loopRunning: boolean;
   adminUpdate: AdminUpdateState;
+  workerUpdates: Map<string, WorkerUpdateStatus>;
+  nodeAutoUpdate: Map<string, boolean>;
   gitPrs: ChatPrSummary[];
   /** Published descriptions by PR number, so description edits round-trip. */
   gitPrBodies: Record<number, string>;
@@ -268,8 +275,50 @@ const MOCK_ADMIN_IDLE = {
   finishedAt: null,
   exitCode: null,
   pid: null,
-  output: ''
+  output: '',
+  mode: null
 } satisfies AdminUpdateState;
+
+/** Issue #1416: the release channel feed behind the update banner. */
+const MOCK_RELEASE_STATUS = {
+  channel: 'edge',
+  current_version: '0.1.3',
+  latest_version: '0.1.4',
+  update_available: true,
+  release_url: 'https://github.com/Kh1ng/git-agent-harness/releases/tag/edge',
+  published_at: new Date(FIXED_NOW).toISOString(),
+  notes: '## 0.1.4 (edge)\n\n- Release channel, in-app Update available, and coordinator-pushed node updates (#1416).'
+} satisfies ReleaseChannelStatus;
+
+const MOCK_WORKER_IDLE: WorkerUpdateStatus = {
+  status: 'idle',
+  current_version: '0.1.2',
+  target_version: null,
+  armed_at: null,
+  started_at: null,
+  finished_at: null,
+  active_dispatches: null,
+  output: ''
+};
+
+const MOCK_FLEET_NODES: NodeSummary[] = [
+  {
+    node_id: 'mock-worker',
+    display_name: 'Mock worker',
+    advertised_url: 'http://127.0.0.1:3774',
+    version: '0.1.2',
+    schema_digest: 'mock-digest',
+    profiles: ['gah'],
+    transport_mode: 'loopback',
+    auto_update: false,
+    update: {
+      status: 'behind',
+      node_version: '0.1.2',
+      coordinator_version: '0.1.3',
+      minimum_worker_version: '0.1.3'
+    }
+  }
+];
 
 const MOCK_USAGE_ROLLUP = {
   profile: 'fixture',
@@ -582,6 +631,8 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     skillObservations: { ['fixture\0codex']: [{ id: 'gah-manager', version: '1.0.0' }] },
     loopRunning: true,
     adminUpdate: structuredClone(MOCK_ADMIN_IDLE),
+    workerUpdates: new Map([['mock-worker', structuredClone(MOCK_WORKER_IDLE)]]),
+    nodeAutoUpdate: new Map([['mock-worker', false]]),
     gitPrs: structuredClone(MOCK_PRS),
     gitPrBodies: {},
     selectedModels: { codex: 'gpt-5.3-codex', claude: 'claude-sonnet-4-5', opencode: 'openai/gpt-5.2', agy: null },
@@ -1305,7 +1356,63 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
 
   // Fleet registry: one healthy fixture node. The real liveness machinery
   // is covered by registryService/registryLiveness tests, not re-tested here.
-  app.get('/api/registry/fleet/snapshot', (_req, res) => res.json({ nodes: [], observations: [], leases: [] }));
+  app.get('/api/registry/fleet/snapshot', (_req, res) => res.json({
+    nodes: MOCK_FLEET_NODES.map((node) => ({
+      ...node,
+      auto_update: state.nodeAutoUpdate.get(node.node_id) ?? node.auto_update
+    })),
+    observations: [],
+    leases: []
+  }));
+
+  // Issue #1416: coordinator-driven worker updates against the fixture node.
+  const workerStatus = (nodeId: string): WorkerUpdateStatus =>
+    state.workerUpdates.get(nodeId) ?? structuredClone(MOCK_WORKER_IDLE);
+  // The mock serves fixture data for whatever node the dashboard names, so
+  // deep-linked node ids resolve the same as the fixture worker.
+  const anyNode = (nodeId: string): NodeSummary =>
+    MOCK_FLEET_NODES.find((candidate) => candidate.node_id === nodeId) ?? MOCK_FLEET_NODES[0];
+  app.post('/api/registry/nodes/:id/update', (req, res) => {
+    const node = anyNode(req.params.id);
+    if (!node) return res.status(404).json({ error: 'Not Found', message: 'Node is not registered.' });
+    const current = workerStatus(req.params.id);
+    if (current.status === 'running' || current.status === 'waiting') return res.status(409).json(current);
+    const started: WorkerUpdateStatus = {
+      ...structuredClone(MOCK_WORKER_IDLE),
+      status: 'running',
+      started_at: new Date(FIXED_NOW + state.reset).toISOString(),
+      target_version: MOCK_RELEASE_STATUS.latest_version
+    };
+    state.workerUpdates.set(req.params.id, started);
+    schedule(() => {
+      state.workerUpdates.set(req.params.id, {
+        ...started,
+        status: 'success',
+        finished_at: new Date(FIXED_NOW + state.reset + 1_000).toISOString(),
+        current_version: MOCK_RELEASE_STATUS.latest_version ?? started.current_version,
+        output: 'Mock worker update completed.\n'
+      });
+    }, 100);
+    return res.status(202).json(started);
+  });
+  app.get('/api/registry/nodes/:id/update', (req, res) => res.json(workerStatus(req.params.id)));
+  app.post('/api/registry/fleet/update-all', (_req, res) => {
+    const results: FleetUpdateResult[] = MOCK_FLEET_NODES.map((node) => ({
+      node_id: node.node_id,
+      display_name: node.display_name,
+      started: true,
+      status: workerStatus(node.node_id),
+      error: null
+    }));
+    return res.json({ results });
+  });
+  app.post('/api/registry/nodes/:id/auto-update', (req, res) => {
+    const node = anyNode(req.params.id);
+    if (!node) return res.status(404).json({ error: 'Not Found', message: 'Node is not registered.' });
+    const enabled = req.body?.enabled === true;
+    state.nodeAutoUpdate.set(node.node_id, enabled);
+    return res.json({ node_id: node.node_id, auto_update: enabled, update: node.update ?? null });
+  });
   app.get('/api/registry/nodes/:id/doctor', (_req, res) => res.json({
     schema_version: 1,
     generated_at: new Date(FIXED_NOW).toISOString(),
@@ -1391,6 +1498,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       manager_wake_autonomy: req.body.manager_wake_autonomy ?? 'off',
       delivery_mode: 'pr',
       validation_timeout_seconds: typeof req.body.validation_timeout_seconds === 'number' ? req.body.validation_timeout_seconds : 300,
+      worker_scaling: mockWorkerScaling(undefined, {}, []),
       chat_session_idle_days: 14
     } satisfies ProfileSummary);
     res.status(201).json({ success: true, message: `Profile '${name}' added` });
@@ -1409,6 +1517,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       ...(bodyString(req.body?.local_path) ? { local_path: req.body.local_path as string } : {}),
       ...(typeof req.body?.max_parallel_workers === 'number' ? { max_parallel_workers: req.body.max_parallel_workers } : {}),
       ...(typeof req.body?.manager_wake_autonomy === 'string' ? { manager_wake_autonomy: req.body.manager_wake_autonomy } : {}),
+      worker_scaling: mockWorkerScaling(current.worker_scaling, req.body ?? {}, clear),
       ...(typeof req.body?.validation_timeout_seconds === 'number'
         ? { validation_timeout_seconds: req.body.validation_timeout_seconds }
         : clear.includes('validation_timeout_seconds') ? { validation_timeout_seconds: 300 } : {})
@@ -1726,7 +1835,8 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
 
   app.get('/api/admin/update', (_req, res) => res.json(MOCK_ADMIN_PENDING));
   app.get('/api/admin/update/status', (_req, res) => res.json(state.adminUpdate));
-  app.post('/api/admin/update', (_req, res) => {
+  app.get('/api/admin/release/status', (_req, res) => res.json(MOCK_RELEASE_STATUS));
+  app.post('/api/admin/update', (req, res) => {
     if (state.adminUpdate.status === 'running') return res.status(409).json(state.adminUpdate);
     state.adminUpdate = {
       status: 'running',
@@ -1734,7 +1844,8 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       finishedAt: null,
       exitCode: null,
       pid: 999,
-      output: 'Mock update started.\n'
+      output: 'Mock update started.\n',
+      mode: req.body?.mode === 'release' ? 'release' : 'source'
     };
     schedule(() => {
       state.adminUpdate = {
@@ -2086,4 +2197,29 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       };
     }
   };
+}
+
+/** Mirrors `gah profile set`'s worker scaling and boost flags. */
+function mockWorkerScaling(
+  current: WorkerScalingSettings | undefined,
+  body: Record<string, unknown>,
+  clear: string[],
+): WorkerScalingSettings {
+  const next: WorkerScalingSettings = { enabled: false, extra_per_model: 1, min_remaining_percent: 50, ...current };
+  if (typeof body.worker_scaling === 'string') next.enabled = body.worker_scaling === 'on';
+  if (typeof body.worker_scaling_max_workers === 'number') next.max_workers = body.worker_scaling_max_workers;
+  else if (clear.includes('worker_scaling_max_workers')) delete next.max_workers;
+  if (typeof body.worker_scaling_extra_per_model === 'number') next.extra_per_model = body.worker_scaling_extra_per_model;
+  if (typeof body.worker_scaling_min_remaining_percent === 'number') next.min_remaining_percent = body.worker_scaling_min_remaining_percent;
+  if (typeof body.boost_workers === 'number' || clear.includes('worker_boost')) {
+    delete next.boost_workers;
+    delete next.boost_model;
+    delete next.boost_until;
+  }
+  if (typeof body.boost_workers === 'number') {
+    next.boost_workers = body.boost_workers;
+    if (typeof body.boost_model === 'string') next.boost_model = body.boost_model;
+    if (typeof body.boost_hours === 'number') next.boost_until = new Date(Date.now() + body.boost_hours * 3_600_000).toISOString();
+  }
+  return next;
 }

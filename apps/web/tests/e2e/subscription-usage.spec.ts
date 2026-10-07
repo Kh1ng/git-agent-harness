@@ -53,6 +53,33 @@ test('windows are named and sized from the provider names, and projected to rese
   expect(busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: { most_recent_work_id: '#1', most_recent_effective_backend: 'codex' } as never }).size).toBe(0);
   // A factory agent process is a subscription at work, whatever the ledger says.
   expect([...busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [{ pid: 1, tool: 'codex', cwd: '/w', started_at: null }] })]).toEqual(['codex']);
+  // Two subscriptions behind one CLI: the model the process runs picks the one that is busy.
+  const pools = [
+    { ...subscriptions[0], id: 'agy:google-native', backend: 'agy', model: 'Gemini Pro' },
+    { ...subscriptions[0], id: 'agy:external', backend: 'agy', model: 'Claude Sonnet' }
+  ];
+  const agyAgent = (model?: string) => ({ pid: 1, tool: 'agy', cwd: '/w', started_at: null, ...(model ? { model } : {}) });
+  expect([...busySubscriptionIds({ subscriptions: pools, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [agyAgent('Claude Sonnet')] })]).toEqual(['agy:external']);
+  expect([...busySubscriptionIds({ subscriptions: pools, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [agyAgent()] })]).toEqual(['agy:google-native']);
+});
+
+test('one ring per account: pools are windows of it, router aliases are not accounts (#1411)', () => {
+  const weekly = (backend: string, instance: string, used: number) => ({
+    backend, provider: 'antigravity', backend_instance: instance, quota_pool: instance, checked_at: '', status: 'data',
+    quota_observations: [{ backend, quota_window: 'weekly', quota_remaining_percent: 100 - used, observed_at: '2026-10-05T19:48:00Z' }]
+  });
+  const usage = subscriptionUsage({
+    candidates: [{ backend: 'agy', backend_instance: 'agy:external', provider: 'antigravity', model: 'Claude Sonnet 4.6 (Thinking)', modes: [], configured: true, eligible_now: true, usage: {} }],
+    quota_checks: [
+      weekly('agy', 'agy:external', 40), weekly('agy', 'agy:google-native', 100),
+      weekly('agy-second', 'agy-second:external', 0), weekly('agy-second', 'agy-second:google-native', 70),
+      { ...weekly('agy', 'cli-router:2dbd806c', 0), status: 'no_data', quota_observations: [] }
+    ]
+  } as never);
+  expect(usage.map((account) => account.id)).toEqual(['agy', 'agy-second']);
+  expect(usage[0].windows.map((window) => [window.label, window.usedPercent])).toEqual([['External models · Weekly', 40], ['Gemini · Weekly', 100]]);
+  expect(usage[0].tightest?.label).toBe('Gemini · Weekly');
+  expect(usage[1].windows.map((window) => window.label)).toEqual(['External models · Weekly', 'Gemini · Weekly']);
 });
 
 test('the navbar shows a ring per subscription and opens its windows; Quota lists collapsible cards', async ({ page }) => {
@@ -60,6 +87,7 @@ test('the navbar shows a ring per subscription and opens its windows; Quota list
   const week = new Date(Date.now() + 62 * 3_600_000).toISOString();
   await page.route('**/api/quota?*', async (route) => {
     const snapshot = await (await route.fetch()).json();
+    snapshot.quota_checks = [];
     snapshot.candidates = candidates.map((candidate) => ({ ...candidate, quota_observations: candidate.quota_observations?.map((o) => ({ ...o, quota_reset_at: o.quota_window === '5-hour' ? soon : week })) }));
     await route.fulfill({ json: snapshot });
   });
@@ -74,9 +102,9 @@ test('the navbar shows a ring per subscription and opens its windows; Quota list
   const chips = page.getByRole('group', { name: 'Subscription usage' });
   await expect(chips.getByRole('button')).toHaveCount(3);
   // The card is the label: no tooltip duplicates it. A working subscription's letter shimmers.
-  const claude = chips.getByRole('button', { name: /Anthropic usage: 66% of session \(5h\) used/ });
+  const claude = chips.getByRole('button', { name: /Anthropic claude usage: 66% of session \(5h\) used/ });
   await expect(claude).not.toHaveAttribute('title', /.+/);
-  await expect(chips.getByRole('button', { name: /OpenAI usage/ }).locator('[data-working]')).toHaveText('O');
+  await expect(chips.getByRole('button', { name: /OpenAI codex usage/ }).locator('[data-working]')).toHaveText('O');
   await expect(claude.locator('[data-working]')).toHaveCount(0);
   await claude.hover();
   const popover = page.getByRole('dialog', { name: 'Anthropic usage' });

@@ -449,6 +449,9 @@ export interface StatusSnapshot {
    * before commit/push. */
   generated_artifact_deny_patterns: string[];
   max_parallel_workers: number;
+  /** How `max_parallel_workers` was reached from the configured baseline.
+   * Absent on CLIs without worker scaling. */
+  worker_limits?: WorkerLimits;
   open_managed_mr_count: number;
   inflight_implementation_count: number;
   implementation_intake_paused: boolean;
@@ -502,6 +505,16 @@ export interface QuotaCandidateStatus {
   quota_observations?: QuotaObservation[];
 }
 
+export type QuotaCheckStatus =
+  | 'data'
+  | 'no_data'
+  | 'failed'
+  /** #1336: the source's latest check says it needs a login or key. */
+  | 'auth_required'
+  /** #1336: a configured candidate expects this allowance source, but the
+   * node holds no credential for it, so no check can ever run there. */
+  | 'not_configured';
+
 export interface QuotaCheck {
   credential_id?: string | null;
   backend: string;
@@ -509,13 +522,21 @@ export interface QuotaCheck {
   backend_instance?: string | null;
   model?: string | null;
   quota_pool?: string | null;
-  checked_at: string;
-  status: 'data' | 'no_data' | 'failed';
+  /** When the check last ran. Absent only for a `not_configured` source,
+   * which has never been checked on that node (#1336). */
+  checked_at?: string | null;
+  status: QuotaCheckStatus;
   quota_observations?: QuotaObservation[];
   error?: string | null;
+  /** #1336: start of the current run of consecutive auth_required
+   * failures; repeat refresh markers keep this one timestamp so the whole
+   * run stays a single "how long has it been failing". */
+  failing_since?: string | null;
 }
 
 export interface QuotaSnapshot {
+  /** v3 adds auth_required/not_configured checks and optional checked_at;
+   * central also accepts legacy v2 worker snapshots. */
   schema_version: number;
   generated_at: string;
   freshness: {
@@ -769,6 +790,29 @@ export interface ReportSeriesData {
  * `WakeAutonomy` in src/config.rs (serde snake_case). */
 export type WakeAutonomyValue = 'off' | 'review_only' | 'full';
 
+/** Growth past a profile's baseline worker count: automatic while a
+ * subscription has quota headroom, and manual through a boost. */
+export interface WorkerScalingSettings {
+  enabled: boolean;
+  /** Ceiling for automatic scaling; unset means twice the baseline. */
+  max_workers?: number;
+  extra_per_model: number;
+  min_remaining_percent: number;
+  boost_workers?: number;
+  /** `backend/model`; unset boosts every capped model. */
+  boost_model?: string;
+  /** RFC 3339 expiry; unset lasts until cleared. */
+  boost_until?: string;
+}
+
+export interface WorkerLimits {
+  baseline_workers: number;
+  workers: number;
+  extra_per_model?: Record<string, number>;
+  /** One operator-readable line per grant or refusal. */
+  notes?: string[];
+}
+
 export interface ProfileSummary {
   name: string;
   display_name: string;
@@ -793,6 +837,8 @@ export interface ProfileSummary {
   max_parallel_workers: number | null;
   /** Effective maximum open managed PRs/MRs for the profile. */
   max_open_managed_mrs: number;
+  /** Absent on CLIs without worker scaling. */
+  worker_scaling?: WorkerScalingSettings;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
@@ -1134,6 +1180,8 @@ export interface ConfigProfileSummary {
   improve_candidates: RoutingCandidateSummary[];
   review_candidates: RoutingCandidateSummary[];
   task_routing_rules: TaskRoutingRuleSummary[];
+  /** Strict allow-lists by job kind (for example `review`); a kind without an entry is open. */
+  allowed_models?: Record<string, RoutingCandidateSummary[]>;
   routine_reviewer: RoutingCandidateSummary | null;
   escalatory_reviewers: RoutingCandidateSummary[];
   context: ConfigProfileContextSummary;
@@ -1854,6 +1902,30 @@ export interface AdminUpdateState {
   exitCode: number | null;
   pid: number | null;
   output: string;
+  /** Issue #1416: which install path this run used -- `release` (download
+   * published artifacts, no rebuild) or `source` (git pull + rebuild).
+   * Absent on states written by pre-#1416 servers. */
+  mode?: 'release' | 'source' | null;
+}
+
+// ---------------------------------------------------------------------------
+// Release channel (issue #1416): a green merge to main publishes a
+// prerelease "edge" build; central compares its own version against the
+// channel's latest so the dashboard can show "Update available · vX → vY"
+// without rebuilding from source.
+// ---------------------------------------------------------------------------
+
+export type ReleaseChannel = 'edge' | 'stable';
+
+export interface ReleaseChannelStatus {
+  channel: ReleaseChannel;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  published_at: string | null;
+  /** The release's own notes/changelog body, bounded by the server. */
+  notes: string;
 }
 
 /** Exact work-item scope of a paid-route request or existing operator grant. */

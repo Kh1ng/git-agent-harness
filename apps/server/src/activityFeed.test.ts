@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { ActivityEvent, ControllerEvent } from '@git-agent-harness/contracts';
+import type { ActivityEvent, ControllerEvent, QuotaSnapshot } from '@git-agent-harness/contracts';
 import { ActivityFeed, activitiesFromQuota, activityFromChat, activityFromController, activityFromGateway, activityFromNode } from './activityFeed.js';
 import quotaFixture from '../tests/fixtures/gah/responses/quota.json' with { type: 'json' };
 
@@ -100,6 +100,66 @@ test('quota and gateway snapshots emit only actionable state', () => {
   assert.deepEqual(activitiesFromQuota(quotaFixture as never), []);
   assert.equal(activityFromGateway({ degraded: true, lastError: 'recall timed out', lastFailedAt: 1, lastOkAt: null })?.kind, 'gateway_down');
   assert.equal(activityFromGateway({ degraded: false, lastError: null, lastFailedAt: null, lastOkAt: 1 }), null);
+});
+
+/** #1336: an expired provider login must announce one action_required
+ * event per failure streak, carrying the provider's remediation and how
+ * long the streak has run -- never one per 30-minute marker. */
+test('an auth_required quota source becomes one action_required event per streak', () => {
+  const snapshot = structuredClone(quotaFixture) as unknown as QuotaSnapshot;
+  snapshot.quota_checks = [
+    {
+      backend: 'claude',
+      backend_instance: 'claude',
+      provider: 'anthropic',
+      checked_at: '2026-10-04T08:30:00Z',
+      status: 'auth_required',
+      failing_since: '2026-10-02T08:00:00Z',
+      error: 'auth_required: Claude OAuth login expired; run claude auth login'
+    },
+    { backend: 'codex', checked_at: '2026-10-04T08:30:00Z', status: 'data' }
+  ];
+  const events = activitiesFromQuota(snapshot);
+  assert.equal(events.length, 1);
+  const event = events[0];
+  assert.equal(event.kind, 'action_required');
+  assert.equal(event.severity, 'warning');
+  assert.equal(event.occurredAt, '2026-10-02T08:00:00Z');
+  assert.ok(event.title.includes('claude'));
+  assert.ok(event.title.includes('needs login'));
+  assert.ok(event.message.includes('run claude auth login'));
+  assert.ok(event.message.includes('2026-10-02T08:00:00.000Z'));
+
+  // A later marker of the same streak keeps the id, so the feed dedupes it.
+  const later = structuredClone(snapshot);
+  later.quota_checks[0].checked_at = '2026-10-05T08:30:00Z';
+  assert.equal(activitiesFromQuota(later)[0].id, event.id);
+
+  // A successful check clears the condition: no event at all.
+  const restored = structuredClone(snapshot);
+  restored.quota_checks[0] = { backend: 'claude', backend_instance: 'claude', checked_at: '2026-10-05T09:00:00Z', status: 'data' };
+  assert.deepEqual(activitiesFromQuota(restored), []);
+
+  // A fresh failure after recovery is a new streak and announces again.
+  const refailed = structuredClone(snapshot);
+  refailed.quota_checks[0] = {
+    backend: 'claude',
+    backend_instance: 'claude',
+    checked_at: '2026-10-06T08:00:00Z',
+    status: 'auth_required',
+    failing_since: '2026-10-06T08:00:00Z',
+    error: 'auth_required: Claude OAuth login expired; run claude auth login'
+  };
+  const renewed = activitiesFromQuota(refailed)[0];
+  assert.notEqual(renewed.id, event.id);
+  assert.equal(renewed.occurredAt, '2026-10-06T08:00:00Z');
+
+  // An unparsable streak start falls back to the check time instead of
+  // throwing and dropping every other quota event.
+  const malformed = structuredClone(refailed);
+  malformed.quota_checks[0].failing_since = 'not a time';
+  const fallback = activitiesFromQuota(malformed)[0];
+  assert.equal(fallback.occurredAt, '2026-10-06T08:00:00Z');
 });
 
 test('live chat lifecycle maps only actionable outcomes with stable bounded content', () => {

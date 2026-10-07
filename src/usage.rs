@@ -3,6 +3,7 @@ use regex::Regex;
 use serde_json::Value;
 
 pub mod account_usage;
+pub mod agy;
 pub mod claude;
 pub mod nous;
 mod vibe;

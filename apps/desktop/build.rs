@@ -32,6 +32,8 @@ fn main() {
             "credential_instances",
             "credential_bind",
             "credential_add_instance",
+            "desktop_update_status",
+            "desktop_apply_update",
         ]),
     ))
     .expect("failed to build desktop permissions");

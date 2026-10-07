@@ -25,32 +25,13 @@ pub fn capacity(
     let latest = crate::quota_store::latest_windows_for_identity(records, identity);
     let mut result = SubscriptionCapacity::default();
     for record in latest {
-        let Some(observed) = record
-            .observed_at
-            .as_deref()
-            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
-        else {
+        let Some(remaining) = fresh_remaining_percent(record, now) else {
             continue;
         };
-        if record.check_error.is_some()
-            || observed > now
-            || now - observed > crate::quota_store::QUOTA_FRESHNESS
-        {
-            continue;
-        }
         let reset = record
             .quota_reset_at
             .as_deref()
             .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok());
-        if reset.is_some_and(|reset| reset <= now) {
-            continue;
-        }
-        let remaining = record.quota_remaining_percent;
-        let Some(remaining) =
-            remaining.filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-        else {
-            continue;
-        };
         if remaining == 0.0 {
             result.exhausted = true;
             result.reset_at = record.quota_reset_at.clone();
@@ -74,6 +55,44 @@ pub fn capacity(
         }
     }
     result
+}
+
+/// Remaining percent of one reading, or `None` when it is failed, stale,
+/// future-dated, already past its reset, or out of range.
+fn fresh_remaining_percent(record: &QuotaObservationRecord, now: OffsetDateTime) -> Option<f64> {
+    let observed = record
+        .observed_at
+        .as_deref()
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())?;
+    if record.check_error.is_some()
+        || observed > now
+        || now - observed > crate::quota_store::QUOTA_FRESHNESS
+    {
+        return None;
+    }
+    let reset = record
+        .quota_reset_at
+        .as_deref()
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok());
+    if reset.is_some_and(|reset| reset <= now) {
+        return None;
+    }
+    record
+        .quota_remaining_percent
+        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+}
+
+/// Smallest remaining percent across every fresh limit window of this
+/// identity, short-term throttles included. `None` means nothing is known.
+pub fn min_fresh_remaining_percent(
+    identity: &ExecutionIdentity,
+    records: &[QuotaObservationRecord],
+    now: OffsetDateTime,
+) -> Option<f64> {
+    crate::quota_store::latest_windows_for_identity(records, identity)
+        .into_iter()
+        .filter_map(|record| fresh_remaining_percent(record, now))
+        .reduce(f64::min)
 }
 
 fn preference(identity: &ExecutionIdentity, capacity: &SubscriptionCapacity) -> u8 {
