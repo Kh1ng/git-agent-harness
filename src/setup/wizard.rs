@@ -322,7 +322,7 @@ impl<'a> Setup<'a> {
                     "Shared memory lets chats and runs remember project context. It is optional:",
                 );
                 self.prompter.say(
-                    "running it here needs a MemoryCore checkout and an OpenAI-compatible API key.",
+                    "running it here needs a MemoryCore checkout. A model provider (Ollama, or an OpenAI-compatible API) is optional.",
                 );
                 let options = [
                     "Skip it for now (you can add it later)".to_string(),
@@ -417,7 +417,10 @@ impl<'a> Setup<'a> {
                 // keyword recall and no model calls.
                 let existing_config = self.host.exists(&path.join("tdai-gateway.local.yaml"));
                 let provider = match self.host.env("GAH_GATEWAY_PROVIDER") {
-                    Some(val) => Some(val),
+                    Some(val) if val == "ollama" || val == "openai" => Some(val),
+                    Some(val) => {
+                        bail!("GAH_GATEWAY_PROVIDER must be ollama or openai, not '{val}'.")
+                    }
                     None if self.options.yes => None,
                     None => {
                         let opts = [
@@ -543,14 +546,21 @@ impl<'a> Setup<'a> {
                         if let Some(val) = llm_key {
                             env.0.push(("GAH_GATEWAY_LLM_API_KEY", val));
                         }
+                        // The installer requires this key unless one is already
+                        // stored for the same endpoint, so an empty answer is allowed.
                         let embed_key = match self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
-                            Some(val) => val,
-                            None => self.secret_from(
-                                "GAH_GATEWAY_EMBEDDING_API_KEY",
-                                "Embedding API key (hidden)",
-                            )?,
+                            Some(val) => Some(val),
+                            None if self.options.yes => None,
+                            None => {
+                                let val = self.prompter.secret(
+                                    "Embedding API key (hidden, empty to keep a stored key)",
+                                )?;
+                                (!val.trim().is_empty()).then(|| val.trim().to_string())
+                            }
                         };
-                        env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", embed_key));
+                        if let Some(val) = embed_key {
+                            env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", val));
+                        }
                     } else {
                         if let Some(key) = self.host.env("GAH_GATEWAY_LLM_API_KEY") {
                             env.0.push(("GAH_GATEWAY_LLM_API_KEY", key));

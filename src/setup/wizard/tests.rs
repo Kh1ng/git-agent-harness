@@ -217,6 +217,58 @@ fn colocated_memory_needs_no_provider_or_key() {
         prompter.asked
     );
     assert!(!env.0.iter().any(|(key, _)| key.ends_with("_API_KEY")));
+
+    // The offer itself no longer says a key is needed.
+    let mut prompter = Script {
+        answers: ["0".to_string()].into(),
+        ..Default::default()
+    };
+    let mut env = InstallEnv::default();
+    Setup {
+        host: &host,
+        prompter: &mut prompter,
+        effects: &mut effects,
+        options: Options::default(),
+    }
+    .memory_settings(&mut env)
+    .unwrap();
+    let offer = prompter.said.join("\n");
+    assert!(offer.contains("model provider"), "{offer}");
+    assert!(offer.contains("is optional"), "{offer}");
+    assert!(!offer.contains("API key."), "{offer}");
+
+    // An unknown provider stops here, before anything is built.
+    let typo = ready_host()
+        .with_path(path.join("src/gateway/server.ts"))
+        .with_path(path.join("node_modules"))
+        .with_env("GAH_GATEWAY_PROVIDER", "olama");
+    let mut env = InstallEnv::default();
+    let error = Setup {
+        host: &typo,
+        prompter: &mut Script::default(),
+        effects: &mut effects,
+        options: options(true),
+    }
+    .memory_settings(&mut env)
+    .unwrap_err();
+    assert!(error.to_string().contains("ollama or openai"), "{error}");
+
+    // Unattended OpenAI with a key already stored: the installer decides.
+    let rerun = ready_host()
+        .with_path(path.join("src/gateway/server.ts"))
+        .with_path(path.join("node_modules"))
+        .with_env("GAH_GATEWAY_PROVIDER", "openai");
+    let mut env = InstallEnv::default();
+    Setup {
+        host: &rerun,
+        prompter: &mut Script::default(),
+        effects: &mut effects,
+        options: options(true),
+    }
+    .memory_settings(&mut env)
+    .unwrap();
+    assert!(env.0.contains(&("GAH_GATEWAY_PROVIDER", "openai".into())));
+    assert!(!env.0.iter().any(|(key, _)| key.ends_with("_API_KEY")));
 }
 
 #[test]

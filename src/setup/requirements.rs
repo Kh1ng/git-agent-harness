@@ -107,7 +107,7 @@ impl Provider {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryMode {
     Off,
-    /// Run the gateway on this machine (needs a MemoryCore checkout and an LLM key).
+    /// Run the gateway on this machine (needs a MemoryCore checkout; a model provider is optional).
     Colocated,
     /// Use a gateway already running elsewhere.
     Remote,

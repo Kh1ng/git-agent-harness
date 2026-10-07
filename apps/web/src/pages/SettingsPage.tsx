@@ -1498,6 +1498,9 @@ export function AdminUpdateSection() {
 }
 
 export function ColocatedProviderSection() {
+  // The page cannot tell a standalone node from a central one, and the
+  // installer persists the role it is given, so the user states it.
+  const [nodeRole, setNodeRole] = useState<'' | 'standalone' | 'central'>('');
   const [provider, setProvider] = useState<'none' | 'openai' | 'ollama'>('none');
   const [providerEndpoint, setProviderEndpoint] = useState('');
   const [llmModel, setLlmModel] = useState('');
@@ -1510,13 +1513,14 @@ export function ColocatedProviderSection() {
   const [error, setError] = useState<string | null>(null);
 
   const revealCommand = async () => {
+    if (!nodeRole) return;
     setRevealing(true);
     setError(null);
     try {
       const revealed = await gahApi.getNodeSetupCommand({
         os: 'linux',
         centralUrl: window.location.origin,
-        role: 'central',
+        role: nodeRole,
         provider,
         providerEndpoint,
         llmModel,
@@ -1544,8 +1548,15 @@ export function ColocatedProviderSection() {
     <section className="card-padded max-w-2xl mt-5">
       <h3 className="text-sm font-semibold text-primary mb-1">Colocated Gateway Provider</h3>
       <p className="text-xs text-muted mb-3">
-        Generate a command to configure the local memory gateway's LLM and embedding provider. Run this on this central node.
+        Generate a command that sets the model provider of the memory gateway on this computer. Run it in a terminal here. Ollama and other local endpoints need no API key.
       </p>
+      <label className="block text-xs text-secondary mb-2">Node role
+        <select className="input w-full mt-1 min-h-11" value={nodeRole} onChange={(e) => { setNodeRole(e.target.value as '' | 'standalone' | 'central'); setCommand(null); }}>
+          <option value="">Choose how this computer is set up</option>
+          <option value="standalone">Standalone (local only)</option>
+          <option value="central">Central (other computers connect to it)</option>
+        </select>
+      </label>
       <label className="block text-xs text-secondary mb-2">MemoryCore Path
         <input type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(e) => { setMemoryCorePath(e.target.value); setCommand(null); }} />
       </label>
@@ -1574,7 +1585,7 @@ export function ColocatedProviderSection() {
         <button
           type="button"
           onClick={revealCommand}
-          disabled={revealing}
+          disabled={revealing || !nodeRole}
           className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 mt-3"
         >
           {revealing ? 'Revealing…' : 'Reveal setup command'}

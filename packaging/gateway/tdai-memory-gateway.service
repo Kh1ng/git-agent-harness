@@ -15,8 +15,9 @@
 #
 # Config: <MemoryCore checkout>/tdai-gateway.local.yaml. A fresh install
 # seeds this from the tracked tdai-gateway.standalone.yaml template
-# (OpenAI-compatible LLM, embedding off / BM25-only) if it doesn't already
-# exist -- edit it directly for a different LLM/embedding backend.
+# (keyword recall, no model calls) if it doesn't already exist. Re-run
+# the installer with GAH_GATEWAY_PROVIDER=ollama or openai to add a model
+# provider; see docs/OPERATIONS.md.
 #
 # Auth: TDAI_GATEWAY_API_KEY lives in ~/.config/gah/tdai-gateway.env
 # (chmod 600), loaded via EnvironmentFile. TDAI_LLM_API_KEY and

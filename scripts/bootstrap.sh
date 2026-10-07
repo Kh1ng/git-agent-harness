@@ -19,7 +19,10 @@
 # `gah setup` flags below, so setup asks only what they left open:
 #   GAH_NODE_ROLE=central|standalone|worker   GAH_CENTRAL_URL=<url>
 #   GAH_GATEWAY_MODE=remote|colocated GAH_GATEWAY_URL=<url> GAH_GATEWAY_MEMORYCORE_PATH=<dir>
-# Secrets (COORDINATOR_TOKEN, GAH_GATEWAY_API_KEY, GAH_GATEWAY_LLM_API_KEY) stay
+#   GAH_GATEWAY_PROVIDER=ollama|openai GAH_GATEWAY_ENDPOINT=<url> and the
+#   GAH_GATEWAY_LLM_MODEL / GAH_GATEWAY_EMBEDDING_MODEL / _DIMENSIONS choices
+# Secrets (COORDINATOR_TOKEN, GAH_GATEWAY_API_KEY, GAH_GATEWAY_LLM_API_KEY,
+# GAH_GATEWAY_EMBEDDING_API_KEY) stay
 # in the environment; setup reads them there and never takes them as flags.
 #
 # GAH_INSTALL_DIR overrides the clone location (default: ~/git-agent-harness).

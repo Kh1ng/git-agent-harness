@@ -29,7 +29,7 @@ INNEREOF
 test('ColocatedProviderSection generates a setup command based on user inputs', async ({ mount, page }) => {
   await page.route('/api/settings/nodes/command', async (route) => {
     const data = route.request().postDataJSON();
-    const command = unixSetupCommand('linux', 'central', 'http://127.0.0.1:3773', data.gatewayUrl, data.provider, data.providerEndpoint, data.llmModel, data.embeddingModel, data.memoryCorePath, data.embeddingDimensions);
+    const command = unixSetupCommand('linux', data.role, 'http://127.0.0.1:3773', data.gatewayUrl, data.provider, data.providerEndpoint, data.llmModel, data.embeddingModel, data.memoryCorePath, data.embeddingDimensions);
     await route.fulfill({ json: { command } });
   });
 
@@ -51,14 +51,20 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   await llmModelInput.fill('llama3');
   await embeddingModelInput.fill('nomic-embed-text');
 
-  await component.getByRole('button', { name: 'Reveal setup command' }).click();
+  // The command keeps the node's own role; nothing is generated until it is stated.
+  const reveal = component.getByRole('button', { name: 'Reveal setup command' });
+  await expect(reveal).toBeDisabled();
+  await component.getByRole('combobox', { name: 'Node role' }).selectOption('standalone');
+  await reveal.click();
 
   const commandPre = component.locator('pre');
   await expect(commandPre).toBeVisible();
 
   // The default path's \`~\` stays unquoted so the node's shell expands it.
-  const ollamaCommand = unixSetupCommand('linux', 'central', 'http://127.0.0.1:3773', undefined, 'ollama', 'http://127.0.0.1:11434/v1', 'llama3', 'nomic-embed-text', undefined, undefined);
+  const ollamaCommand = unixSetupCommand('linux', 'standalone', 'http://127.0.0.1:3773', undefined, 'ollama', 'http://127.0.0.1:11434/v1', 'llama3', 'nomic-embed-text', undefined, undefined);
   await expect(commandPre).toHaveText(ollamaCommand);
+  expect(ollamaCommand).toContain('standalone');
+  expect(ollamaCommand).not.toContain('central');
   expect(ollamaCommand).not.toContain('read -rsp');
   expect(runCommand(ollamaCommand)).toBe('path=/destination/home/TencentDB-Agent-Memory/MemoryCore\nllm=<unset>\nembedding=<unset>\n');
 
@@ -70,7 +76,7 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
 
   await component.getByRole('button', { name: 'Reveal setup command' }).click();
 
-  const openAiCommand = unixSetupCommand('linux', 'central', 'http://127.0.0.1:3773', undefined, 'openai', 'https://api.openai.com/v1', 'gpt-4o', 'text-embedding-3-small', undefined, undefined);
+  const openAiCommand = unixSetupCommand('linux', 'standalone', 'http://127.0.0.1:3773', undefined, 'openai', 'https://api.openai.com/v1', 'gpt-4o', 'text-embedding-3-small', undefined, undefined);
   await expect(commandPre).toHaveText(openAiCommand);
   expect(runCommand(openAiCommand, 'generation-canary\nembedding-canary\n')).toBe('path=/destination/home/TencentDB-Agent-Memory/MemoryCore\nllm=generation-canary\nembedding=embedding-canary\n');
   expect(runCommand(openAiCommand, '\nembedding-canary\n')).toBe('path=/destination/home/TencentDB-Agent-Memory/MemoryCore\nllm=<unset>\nembedding=embedding-canary\n');

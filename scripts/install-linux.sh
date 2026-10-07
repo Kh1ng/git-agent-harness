@@ -236,7 +236,7 @@ case "${GAH_GATEWAY_MODE:-}" in
     gateway_local_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
     if [ ! -f "$gateway_local_config" ]; then
       cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_local_config"
-      echo "Seeded $gateway_local_config from the tracked standalone template (OpenAI-compatible LLM, embedding off / BM25-only -- edit directly for a different backend)"
+      echo "Seeded $gateway_local_config from the tracked standalone template (keyword recall, no model calls -- set GAH_GATEWAY_PROVIDER=ollama or openai to add a model provider)"
     else
       echo "Preserving existing $gateway_local_config"
     fi
