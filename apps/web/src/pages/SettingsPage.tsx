@@ -31,7 +31,7 @@ const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keyw
   { heading: 'Connection & pairing', section: null, keywords: 'access token device pair qr central server' },
   { heading: 'Appearance', section: 'general', keywords: 'theme dark light notifications popup bell' },
   { heading: 'Global manager', section: 'general', keywords: 'manager wake autonomy' },
-  { heading: 'Node memory capacity', section: 'general', keywords: 'node capacity memory reservation floor admission workers' },
+  { heading: 'Machine capacity', section: 'general', keywords: 'node capacity memory cpu cores ceiling reservation floor admission workers' },
   { heading: 'Notification channel', section: 'general', keywords: 'notifications alerts telegram' },
   { heading: 'Chat', section: 'general', keywords: 'manager chat backend model helper routing' },
   { heading: 'Update GAH', section: 'general', keywords: 'version upgrade release' },
@@ -355,7 +355,8 @@ function NodeCapacitySection({ config, setConfig }: Pick<GlobalManagerSectionPro
   // The same sums admission does, for an otherwise idle machine.
   const fit = resources && valid ? {
     memory: Math.floor((resources.memory_total_mib - (floorValue === 0 ? Math.max(2048, resources.memory_total_mib / 6) : floorValue)) / workerValue),
-    cpu: cpuKnown ? Math.floor(Math.max(1, resources.logical_cpus * ceilingValue / 100) / coresValue) : null
+    // Admission always lets the first worker in, even when it needs more than the ceiling.
+    cpu: cpuKnown ? Math.max(1, Math.floor(Math.max(1, resources.logical_cpus * ceilingValue / 100) / coresValue)) : null
   } : null;
   const inputClass = 'w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary';
   const gib = (mib: number) => (mib / 1024).toFixed(1);

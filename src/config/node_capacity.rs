@@ -151,6 +151,45 @@ mod tests {
     }
 
     #[test]
+    fn cpu_defaults_and_ranges() {
+        let defaults = NodeCapacitySettings::default();
+        assert_eq!(defaults.worker_cpu_cores, 2);
+        assert_eq!(defaults.cpu_ceiling_percent, 90);
+        for (cores, percent, valid) in [
+            (1, 10, true),
+            (64, 400, true),
+            (0, 90, false),
+            (65, 90, false),
+            (2, 9, false),
+            (2, 401, false),
+        ] {
+            let settings = NodeCapacitySettings {
+                worker_cpu_cores: cores,
+                cpu_ceiling_percent: percent,
+                ..defaults
+            };
+            assert_eq!(
+                settings.validate().is_ok(),
+                valid,
+                "{cores} cores, {percent}%"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_keys_round_trip_and_default_when_absent() {
+        let old_config: NodeCapacitySettings = toml::from_str("worker_memory_mib = 1536").unwrap();
+        assert_eq!(old_config.worker_cpu_cores, 2);
+        assert_eq!(old_config.cpu_ceiling_percent, 90);
+        let settings: NodeCapacitySettings =
+            toml::from_str("worker_cpu_cores = 4\ncpu_ceiling_percent = 150").unwrap();
+        let restored: NodeCapacitySettings =
+            toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.worker_cpu_cores, 4);
+        assert_eq!(restored.cpu_ceiling_percent, 150);
+    }
+
+    #[test]
     fn toml_round_trip() {
         let settings: NodeCapacitySettings =
             toml::from_str("worker_memory_mib = 1536\nmemory_floor_mib = 768").unwrap();
