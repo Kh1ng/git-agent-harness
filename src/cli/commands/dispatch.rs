@@ -222,6 +222,7 @@ mod tests {
             target: "ticket.md".into(),
             model: Some("gpt-6.1-sol".into()),
             manual_worker: true,
+            enforce_job_file: false,
             reasoning_effort: Some("high".into()),
             branch: None,
             mr: None,
