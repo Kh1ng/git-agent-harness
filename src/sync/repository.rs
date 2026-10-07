@@ -109,24 +109,19 @@ pub(super) fn active_github_mrs_without_ci(
     Ok(github_open_prs_rest(profile, "active observation")?
         .into_iter()
         .filter(|pr| {
-            if filter_gah_branches && profile.publishing.github_claim_identity.is_some() {
-                let labels = pr
-                    .labels
-                    .iter()
-                    .map(|label| label.name.clone())
-                    .collect::<Vec<_>>();
-                crate::dispatch::github_work_item_intake_allowed(
-                    profile,
-                    &serde_json::json!({"user": pr.user}),
-                    &labels,
-                )
-            } else {
-                !filter_gah_branches
-                    || pr
-                        .head
-                        .branch
-                        .starts_with(&profile.publishing.managed_branch_prefix)
-            }
+            // Managed PRs come from issues that already passed intake; under
+            // shared claims, other PRs must pass the same intake policy.
+            !filter_gah_branches
+                || pr
+                    .head
+                    .branch
+                    .starts_with(&profile.publishing.managed_branch_prefix)
+                || (profile.publishing.github_claim_identity.is_some()
+                    && crate::dispatch::github_work_item_intake_allowed(
+                        profile,
+                        &serde_json::json!({"user": pr.user}),
+                        &pr.labels.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+                    ))
         })
         .map(|pr| SyncMr {
             work_id: extract_work_id_from_title(&pr.title),

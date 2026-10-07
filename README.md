@@ -563,9 +563,10 @@ github_claim_poll_seconds = 15
 managed_branch_prefix = "gah/"
 ```
 
-Both installations discover the same eligible open issues and PRs. PR discovery
-uses the same trusted-author and unattended-label policy as issue discovery;
-fleet-routing labels have no effect. Controller blockers, review holds, and
+Both installations discover the same eligible open issues and PRs. Managed-branch
+PRs stay eligible because their source issue already passed intake; any other PR
+must pass the same trusted-author and unattended-label policy as issue discovery.
+Fleet-routing labels have no effect. Controller blockers, review holds, and
 retry budgets still run before dispatch and assignment. An issue dispatch claims
 its issue number; a review or repair claims the PR number (never the linked
 source issue). The selected action determines the role.
