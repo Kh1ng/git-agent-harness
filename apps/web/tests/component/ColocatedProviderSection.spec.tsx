@@ -95,6 +95,9 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
     });
   });
 
+  // The copied text is the command as shown, which the shell run above accepted.
+  const shown = (await commandPre.textContent()) ?? '';
+  expect(shown).toContain('GAH_GATEWAY_PROVIDER=');
   await copyButton.click();
-  await expect.poll(() => clipboardText).toContain("GAH_GATEWAY_PROVIDER='ollama'");
+  await expect.poll(() => clipboardText).toBe(shown);
 });
