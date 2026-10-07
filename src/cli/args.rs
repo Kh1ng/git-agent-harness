@@ -413,6 +413,9 @@ pub enum Commands {
         /// genuine `VALIDATION GATE FAILED` error.
         #[arg(long, default_value_t = false)]
         skip_validation_gate: bool,
+        /// Enforce scope and verification commands from a local Markdown job file.
+        #[arg(long, default_value_t = false)]
+        enforce_job_file: bool,
     },
     /// Validate or explicitly publish product-manager decomposition plans.
     Pm {

@@ -1539,3 +1539,28 @@ Read-only setup JSON retains `ready` for compatibility and exposes
 `application_ready`, `factory_enabled`, and `factory_ready` separately.
 Factory readiness means the module is enabled and setup prerequisites are ready;
 project/backend dispatch readiness still comes from the existing doctor checks.
+
+### Local job file contracts
+
+A local Markdown file passed with `gah dispatch --enforce-job-file --mode fix --target path/to/job.md`
+can define `Allowed files` and `Verification commands` sections in both `--mode fix`
+and `--mode improve`. Without `--enforce-job-file`, nothing is enforced and job
+commands are not run or added to the prompt. The flag requires a local `.md` file
+with at least one contract section; otherwise dispatch fails before the agent runs. Each section
+must contain top-level Markdown bullets (`-`, `*`, or `+`). Indented bullets
+are errors; fenced code blocks and explanatory sentences are ignored. Headings
+are case-insensitive and may end with a colon. Dispatch takes the first
+backtick-delimited value in each bullet, or the trimmed bullet text before
+` (` (a note). Empty items and sections without bullets are errors.
+Allowed files are repository-relative paths or globs: `*` matches within a
+segment, and a trailing `/` or `/**` allows all files beneath a directory.
+Absolute paths and `..` are rejected. After profile validation, dispatch checks
+changed paths, then runs the job commands; failures enter the repair retry loop.
+Scope and job commands are checked again before publishing, including with
+`--allow-draft-fail`. Missing sections disable their respective rules.
+
+These contracts apply only when an operator hands the file to `gah dispatch`
+directly. They never apply to a provider issue, and never to a ticket the loop
+selected on its own, even if that ticket file has the same headings: there the
+sections stay hints. With `--mr` or `--existing-branch`, the scope check also
+counts changes already on the branch.
