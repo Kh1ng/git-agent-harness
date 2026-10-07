@@ -1488,3 +1488,6 @@ mod control_records;
 
 #[path = "tests/early_failure.rs"]
 mod early_failure;
+
+#[path = "tests/claim_work_id.rs"]
+mod claim_work_id;

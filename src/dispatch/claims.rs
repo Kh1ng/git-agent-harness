@@ -94,20 +94,54 @@ fn is_control_record(mode: &str) -> bool {
 /// Fold one work item's ledger history in append order. Control records leave
 /// the lease alone; dispatch outcomes and attempt resets resolve it.
 fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> bool {
-    let mut active = false;
+    active_claim(entries).is_some()
+}
+
+/// The claim entry that still holds this work item's lease, if any, so the
+/// caller can look at what the claim recorded about its own dispatch.
+fn active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> Option<&'a LedgerEntry> {
+    let mut active = None;
     for entry in entries {
         if crate::ledger::is_entry_stale(entry) {
             continue;
         }
         match entry.mode.as_str() {
-            "claim" => active = !is_claim_stale(entry),
+            "claim" => active = (!is_claim_stale(entry)).then_some(entry),
             mode if is_control_record(mode) => {}
             // Every remaining entry is an execution attempt, a capacity
             // deferral, or clear_attempts, all of which end the prior claim.
-            _ => active = false,
+            _ => active = None,
         }
     }
     active
+}
+
+/// Issue #1466: a claim is taken under the id the target file names
+/// (`TICKET-500`, a `candidate_id`), but a dispatch that resolves a
+/// non-authoritative ticket or a candidate file records its terminal entry
+/// under the branch name, so that entry never reaches `active_claim`'s fold.
+/// Both entries do carry the dispatch's session directory, which is unique
+/// per run: any non-stale execution or outcome entry written for the
+/// claim's session shows the run ended. A claim without a session directory
+/// (written before #1466) stays active until it goes stale.
+fn claim_run_has_ended(cfg: &GahConfig, claim: &LedgerEntry) -> bool {
+    let Some(session_dir) = claim.session_dir.as_deref() else {
+        return false;
+    };
+    let entries = match ledger::read_entries(cfg) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("warning: failed to read ledger entries: {:#}", e);
+            return false;
+        }
+    };
+    entries.iter().any(|entry| {
+        entry.session_dir.as_deref() == Some(session_dir)
+            && entry.repo_id == claim.repo_id
+            && entry.mode != "claim"
+            && !is_control_record(&entry.mode)
+            && !crate::ledger::is_entry_stale(entry)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,16 +278,17 @@ pub(super) fn check_duplicate_work(
     // Try to fetch MRs/PRs from provider
     let mrs = crate::sync::fetch_active_mrs(profile)?;
 
-    if !central_claims_active
-        && has_active_claim(
+    if !central_claims_active {
+        let claim = active_claim(
             matching_entries
                 .iter()
                 .filter(|entry| entry.repo_id == profile.repo_id),
-        )
-    {
-        return Err(anyhow::Error::new(ActiveClaimError {
-            work_id: work_id.clone(),
-        }));
+        );
+        if claim.is_some_and(|claim| !claim_run_has_ended(cfg, claim)) {
+            return Err(anyhow::Error::new(ActiveClaimError {
+                work_id: work_id.clone(),
+            }));
+        }
     }
 
     for entry in matching_entries {
@@ -318,10 +353,15 @@ pub(super) fn check_duplicate_work(
 /// (`None` when using the local mechanism, or nothing to claim) -- moved
 /// out of `dispatch::run` to keep that function under the dispatch
 /// facade's line-count cap (issue #882).
+///
+/// `session_dir` is the directory `run()` gives this dispatch; the local
+/// claim entry records it so `claim_run_has_ended` can match the run's
+/// terminal entry whatever work id that entry ends up under (#1466).
 pub(super) fn acquire_claim(
     cfg: &GahConfig,
     profile: &Profile,
     args: &DispatchArgs,
+    session_dir: &Path,
 ) -> Result<(Option<crate::central_claims::ClaimGuard>, Option<String>)> {
     let central_url = cfg.defaults.registry_central_url.clone();
     let Some(work_id) = check_duplicate_work(cfg, profile, args, central_url.is_some())? else {
@@ -346,7 +386,8 @@ pub(super) fn acquire_claim(
     // work runs, so a concurrent `gah loop`/`gah dispatch` process sees it
     // right away rather than only after this attempt finishes (minutes to
     // hours later).
-    let claim = LedgerEntry::new_claim(&args.profile, profile, &work_id);
+    let mut claim = LedgerEntry::new_claim(&args.profile, profile, &work_id);
+    claim.session_dir = Some(session_dir.display().to_string());
     if let Err(e) = ledger::append(cfg, &claim) {
         eprintln!("warning: failed to append claim ledger entry: {e:#}");
     }

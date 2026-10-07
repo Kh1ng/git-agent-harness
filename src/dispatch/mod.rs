@@ -181,18 +181,6 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     // NOT conflated with the dispatched ticket's own outcome.
     self_check_validation_gate(profile, cfg, args.skip_validation_gate)?;
 
-    // Issue #882: local claim-mode ledger entry, or a central claims API
-    // lease when configured (fail closed) -- see claims::acquire_claim.
-    // The guard is kept alive for the rest of `run()` via this binding;
-    // its `Drop` releases the claim on every exit path below, including
-    // the many early returns.
-    let (_central_claim_guard, claimed_work_id) =
-        if JobKind::parse(&args.mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike) {
-            claims::acquire_claim(cfg, profile, args)?
-        } else {
-            (None, None)
-        };
-
     let ts = args
         .run_id
         .clone()
@@ -200,6 +188,18 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     let session_dir = PathBuf::from(&profile.artifact_root)
         .join("sessions")
         .join(&ts);
+    // Issue #882: local claim-mode ledger entry, or a central claims API
+    // lease when configured (fail closed) -- see claims::acquire_claim.
+    // The guard is kept alive for the rest of `run()` via this binding;
+    // its `Drop` releases the claim on every exit path below, including
+    // the many early returns.
+    let (_central_claim_guard, claimed_work_id) =
+        if JobKind::parse(&args.mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike) {
+            claims::acquire_claim(cfg, profile, args, &session_dir)?
+        } else {
+            (None, None)
+        };
+
     let mut ledger = LedgerEntry::new(
         &args.profile,
         profile,

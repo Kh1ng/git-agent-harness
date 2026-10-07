@@ -23,7 +23,8 @@ fn early_failure_with_claimed_work_id_releases_the_claim() {
     let (cfg, prof, args) = early_failure_fixture(tmp.path());
     let _guard = PathGuard::set(tmp.path().join("bin"));
 
-    let (_, claimed) = acquire_claim(&cfg, &prof, &args).unwrap();
+    let session_dir = tmp.path().join("sessions/run");
+    let (_, claimed) = acquire_claim(&cfg, &prof, &args, &session_dir).unwrap();
     assert_eq!(claimed.as_deref(), Some("TICKET-500"));
 
     let mut entry = early_failure_entry(&prof);
@@ -42,7 +43,7 @@ fn early_failure_without_work_id_leaves_the_claim_active() {
     let (cfg, prof, args) = early_failure_fixture(tmp.path());
     let _guard = PathGuard::set(tmp.path().join("bin"));
 
-    acquire_claim(&cfg, &prof, &args).unwrap();
+    acquire_claim(&cfg, &prof, &args, &tmp.path().join("sessions/run")).unwrap();
     crate::ledger::append(&cfg, &early_failure_entry(&prof)).unwrap();
 
     let again = check_duplicate_work(&cfg, &prof, &args, false);
