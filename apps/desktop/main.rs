@@ -9,14 +9,15 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
     webview::PageLoadEvent,
-    Manager,
+    Emitter, Manager,
 };
 
 mod credentials;
+mod desktop_update;
 mod mistral_login;
 mod open_project;
-mod setup_check;
 mod repository_tools;
+mod setup_check;
 
 const OWNER_CREDENTIAL_SERVICE: &str = "com.kh1ng.gah.owner";
 const OWNER_TOKEN_STORAGE_KEY: &str = "gah.coordinatorToken";
@@ -474,7 +475,9 @@ fn installed_gah() -> Result<PathBuf, String> {
         .and_then(|path| path.parent())
         .map(|home| home.join(".cargo/bin/gah"))
         .filter(|path| path.is_file())
-        .ok_or_else(|| "GAH is not installed. Run scripts/install-macos.sh from a clean checkout first.".into())
+        .ok_or_else(|| {
+            "GAH is not installed. Run scripts/install-macos.sh from a clean checkout first.".into()
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -567,7 +570,9 @@ async fn set_node_role(
     }
     let mut settings = read_settings();
     if settings.repository_path.is_empty() {
-        return Err("Run scripts/install-macos.sh from a clean GAH checkout before changing roles.".into());
+        return Err(
+            "Run scripts/install-macos.sh from a clean GAH checkout before changing roles.".into(),
+        );
     }
     if role == "worker" && first_profile().is_none() {
         return Err("Configure at least one profile before starting this Mac as a worker.".into());
@@ -584,7 +589,9 @@ async fn set_node_role(
         central_url(&remote)?;
         config.args(["--registry-central-url", &remote]);
     }
-    let configured = config.status().map_err(|error| format!("Cannot update the node role: {error}"))?;
+    let configured = config
+        .status()
+        .map_err(|error| format!("Cannot update the node role: {error}"))?;
     if !configured.success() {
         return Err(format!("GAH rejected the node role change ({configured})."));
     }
@@ -608,13 +615,12 @@ async fn set_node_role(
         let mut rollback = command(gah.to_string_lossy().as_ref());
         rollback.args(["config", "set", "--node-role", &settings.node_role]);
         if settings.node_role == "worker" && !settings.remote_central_url.is_empty() {
-            rollback.args([
-                "--registry-central-url",
-                &settings.remote_central_url,
-            ]);
+            rollback.args(["--registry-central-url", &settings.remote_central_url]);
         }
         let _ = rollback.status();
-        return Err(format!("{update_error} The saved role was restored and the previous service is unchanged."));
+        return Err(format!(
+            "{update_error} The saved role was restored and the previous service is unchanged."
+        ));
     }
     #[cfg(target_os = "macos")]
     if role == "worker" {
@@ -715,7 +721,15 @@ async fn worker_status(
         let _ = state;
         let settings = read_settings();
         let running = settings.node_role == "worker" && launchd_running("worker");
-        set_tray_status(&app, &settings.node_role, if settings.node_role == "central" { launchd_running("central") } else { running });
+        set_tray_status(
+            &app,
+            &settings.node_role,
+            if settings.node_role == "central" {
+                launchd_running("central")
+            } else {
+                running
+            },
+        );
         Ok(WorkerStatus {
             running,
             tools,
@@ -889,6 +903,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             { WorkerState }
         })
+        // Issue #1416: in-app desktop updates from the signed release feed.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             desktop_settings,
             save_presence,
@@ -916,7 +932,9 @@ fn main() {
             credentials::credential_refresh,
             credentials::credential_instances,
             credentials::credential_bind,
-            credentials::credential_add_instance
+            credentials::credential_add_instance,
+            desktop_update::desktop_update_status,
+            desktop_update::desktop_apply_update
         ])
         .setup(|app| {
             let settings = read_settings();
@@ -991,6 +1009,25 @@ fn main() {
                 MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit GAH", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&connection, &dashboard, &quit])?;
+
+            // Issue #1416: check the signed release feed at launch and every
+            // few hours; the Settings window listens for the event and shows
+            // the non-blocking "Update available · vX → vY" row. A missing
+            // key or unreachable feed stays quiet (the status payload
+            // carries the error; nothing blocks startup).
+            {
+                let updater_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let status = tauri::async_runtime::block_on(
+                            desktop_update::desktop_update_status(updater_app.clone()),
+                        );
+                        let _ = updater_app.emit("gah:desktop-update", &status);
+                        std::thread::sleep(std::time::Duration::from_secs(4 * 60 * 60));
+                    }
+                });
+            }
+
             TrayIconBuilder::with_id("gah-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)

@@ -4,7 +4,7 @@ use crate::validation_runner::validate;
 use crate::worktree;
 use anyhow::{Context, Result};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use time::OffsetDateTime;
 
@@ -180,7 +180,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         profile.default_target_branch
     );
 
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+    let worktree_base = crate::config::effective_worktree_base(&cfg.defaults);
 
     // `worktree::create` errors out if the branch already exists. Use a
     // full-precision timestamp + random suffix so the branch name is truly

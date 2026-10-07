@@ -22,6 +22,16 @@ use support::{test_tempdir, write_fake_binary as make_fake_bin_with_body, Proces
 // class of problem.
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
+/// Take the serializing lock. A test that fails while holding it poisons the
+/// mutex; the lock guards no data, only ordering, so the next test takes it
+/// anyway. Without this one timeout fails every test that runs after it with
+/// `PoisonError`, which hides which test actually failed.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     // These tests exercise refill state transitions, not host sizing. The
     // real debug binary accepts this explicit fixture; release binaries never
@@ -105,7 +115,7 @@ fn read_u32_file(path: &std::path::Path) -> u32 {
 #[cfg(unix)]
 #[test]
 fn process_group_guard_drop_reaps_the_entire_test_process_group() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     use std::os::unix::process::CommandExt;
     let mut command = ProcessCommand::new("/bin/sh");
     command
@@ -268,7 +278,7 @@ fn setup_fix_dispatch_repo(
 
 #[test]
 fn parallel_loop_refills_immediately_after_a_fast_completion() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
 
@@ -406,7 +416,7 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
 
 #[test]
 fn parallel_loop_selects_new_review_after_capacity_deferred_sibling() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let config = fs::read_to_string(&cfg).unwrap().replace(
@@ -542,7 +552,7 @@ fn parallel_loop_selects_new_review_after_capacity_deferred_sibling() {
 
 #[test]
 fn parallel_loop_reviews_a_finished_ticket_while_a_slow_sibling_still_runs() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
 
@@ -677,7 +687,7 @@ fn parallel_loop_reviews_a_finished_ticket_while_a_slow_sibling_still_runs() {
 
 #[test]
 fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -743,7 +753,7 @@ fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
 
 #[test]
 fn parallel_loop_does_not_refill_after_shutdown() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -822,7 +832,7 @@ fn parallel_loop_does_not_refill_after_shutdown() {
 
 #[test]
 fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -975,7 +985,7 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
 
 #[test]
 fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -1119,7 +1129,7 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
 
 #[test]
 fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -1226,7 +1236,7 @@ fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
 
 #[test]
 fn parallel_loop_remains_prompt_on_shutdown_while_node_capacity_is_deferred() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = serial();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();

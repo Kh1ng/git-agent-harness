@@ -15,11 +15,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 mod installation;
+mod launch_agent;
+mod reexec;
+mod release;
 mod units;
 pub use installation::installation_plan;
 #[cfg(test)]
 use installation::quota_refresh_selected;
+use installation::NPM_CI_ARGS;
 use installation::{agents_to_refresh, install_selected_agent_assets};
+use launch_agent::install_macos_launch_agent;
 
 pub use crate::node_role::NodeRole as HostRole;
 
@@ -31,6 +36,12 @@ pub struct UpdateArgs {
     pub role: HostRole,
     pub restart_server: bool,
     pub server_service: String,
+    /// Issue #1416: install published release artifacts instead of
+    /// rebuilding from source. The checkout stays the deployment root.
+    pub from_release: bool,
+    /// Explicit manifest (edge-manifest.json) URL or local path; defaults
+    /// to the edge feed derived from the checkout's origin remote.
+    pub release_manifest: Option<String>,
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
@@ -40,56 +51,67 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
 
     let repo = resolve_repo(args.repo.as_deref())?;
-    let _update_lock = acquire_update_lock(&repo)?;
-    if args.pull {
+    let update_lock = acquire_update_lock(&repo)?;
+    // Set when this process is the newly installed CLI finishing an update
+    // the previous binary started; the plan was already accepted.
+    let resumed = env::var_os(reexec::ENV).is_some();
+    let config_home = user_config_home()?;
+    let agents = agents_to_refresh(&config_home, &args.agents);
+
+    if args.from_release {
+        if args.restart_server {
+            ensure_no_running_loop_before_server_restart()?;
+        }
+        // Agent integrations and their quota units come from the checkout
+        // on both update paths.
+        install_selected_agent_assets(&repo, &config_home, &agents)?;
+        return release::run_release(release::ReleaseArgs {
+            repo,
+            role: args.role,
+            restart_server: args.restart_server,
+            server_service: args.server_service,
+            manifest: args.release_manifest,
+        });
+    }
+
+    if args.pull && !resumed {
         ensure_default_branch_checkout(&repo)?;
         ensure_clean(&repo)?;
     }
-    let config_home = user_config_home()?;
-    let agents = agents_to_refresh(&config_home, &args.agents);
     let plan = installation_plan(args.role, &agents)?;
-    for change in &plan {
-        println!("  - {change}");
-    }
-    if args.restart_server {
-        println!("  - Restart control-plane service {}", args.server_service);
-    }
-    if args.pull {
-        println!(
-            "  - Fetch origin and pull --ff-only into {}",
-            repo.display()
-        );
-    }
-    if !args.yes {
-        use std::io::Write;
-        print!("Apply these changes? [y/N] ");
-        std::io::stdout().flush()?;
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            bail!("Update cancelled before installation");
-        }
+    if !resumed {
+        installation::confirm(&plan, &args, &repo)?;
     }
     if args.restart_server {
         ensure_no_running_loop_before_server_restart()?;
     }
 
     println!("Updating GAH CLI/control plane from {}", repo.display());
-    if args.pull {
+    if args.pull && !resumed {
         run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
         run_command(&repo, "git", &["pull", "--ff-only"])?;
     }
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    ensure_lockfile_current(&repo)?;
-    run_command(
-        &repo,
-        "cargo",
-        &[
-            "install", "--path", ".", "--bin", "gah", "--force", "--locked",
-        ],
-    )?;
+    if !resumed {
+        ensure_lockfile_current(&repo)?;
+        run_command(
+            &repo,
+            "cargo",
+            &[
+                "install",
+                "--path",
+                ".",
+                "--bin",
+                "gah",
+                "--bin",
+                "gah-mcp-server",
+                "--force",
+                "--locked",
+            ],
+        )?;
+    }
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -100,6 +122,16 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
+    // Everything after this point (unit rendering, installers) is code that
+    // the pull may have changed. Finish with the binary just installed, not
+    // this older one: an old binary once installed an unrendered
+    // gah-server.service and the restart failed.
+    // The checkout may be newer than this binary whether or not --pull ran
+    // (`git pull && gah update` is the common case), so always hand over.
+    if !resumed {
+        drop(update_lock);
+        return reexec::continue_with(&binary, &args, &repo);
+    }
     // Both roles install user units below; keep them alive past logout. Done
     // early so a later failed step cannot skip it.
     enable_user_lingering(&repo, args.role);
@@ -107,44 +139,28 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     install_selected_agent_assets(&repo, &config_home, &agents)?;
 
     if cfg!(target_os = "macos") && args.role == HostRole::Worker {
-        run_command(
-            &repo,
-            "npm",
-            &[
-                "ci",
-                "--include=dev",
-                "--legacy-peer-deps",
-                "--prefer-offline",
-                "--no-audit",
-                "--no-fund",
-            ],
-        )?;
+        run_command(&repo, "npm", NPM_CI_ARGS)?;
     }
 
     if matches!(args.role, HostRole::Central | HostRole::Standalone) {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
         // worker node dispatches jobs only and never serves this.
-        run_command(
-            &repo,
-            "npm",
-            &[
-                "ci",
-                "--include=dev",
-                "--legacy-peer-deps",
-                "--prefer-offline",
-                "--no-audit",
-                "--no-fund",
-            ],
-        )?;
+        run_command(&repo, "npm", NPM_CI_ARGS)?;
         run_command(&repo, "npm", &["run", "build:server"])?;
-        run_command(&repo, "npm", &["run", "build:mcp-server"])?;
         if !repo.join("apps/server/dist/bin.js").is_file() {
             bail!("server build did not produce apps/server/dist/bin.js");
         }
-        if !repo.join("apps/mcp-server/dist/bin.js").is_file() {
-            bail!("MCP build did not produce apps/mcp-server/dist/bin.js");
+        // The MCP server is a Rust binary of this crate: `cargo install`
+        // above already placed it next to `gah`.
+        let mcp_server = binary.with_file_name("gah-mcp-server");
+        if !mcp_server.is_file() {
+            bail!(
+                "cargo install completed but expected executable is missing: {}",
+                mcp_server.display()
+            );
         }
+        println!("Installed MCP server: {}", mcp_server.display());
         println!(
             "Built server:  {}",
             repo.join("apps/server/dist/bin.js").display()
@@ -175,12 +191,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             }
         }
 
-        // Issue #896: build the web dashboard and deploy it to the host's
-        // web-server root (configurable via GAH_WEB_DEPLOY_ROOT; unset
-        // defaults to /var/www/gah). The deploy root is a convention, not
-        // something this repo ships -- an operator MUST point it at wherever
-        // the host actually serves the dashboard from, and the deploy prints
-        // the chosen root so a mismatch is visible.
+        // The server serves the dashboard from the checkout's build (#1327).
+        // A host with its own web server also gets a copy in that server's
+        // root; see `resolve_web_deploy_root`.
         if cfg!(target_os = "macos") {
             run_command(&repo, "npm", WEB_BUILD_ARGS)?;
             println!(
@@ -190,7 +203,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         } else {
             match deploy_web_ui(&repo)? {
                 Some(root) => println!("Deployed web UI to {}", root.display()),
-                None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+                None => println!("Built web UI; gah-server serves it from apps/web/dist."),
             }
         }
     } else if cfg!(target_os = "macos") {
@@ -208,10 +221,24 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("Role is 'worker': skipping control-plane server build on this host.");
     }
 
+    finish_update(&repo, args.role, &args.server_service, args.restart_server)
+}
+
+/// The shared tail of both update paths (source and release, issue #1416):
+/// macOS service definitions, the systemd user units that must stay in
+/// lockstep with the installed CLI, and the optional control-plane restart.
+/// Which artifacts got installed differs per path; what must happen to the
+/// host afterward does not.
+fn finish_update(
+    repo: &Path,
+    role: HostRole,
+    server_service: &str,
+    restart_server: bool,
+) -> Result<()> {
     if cfg!(target_os = "macos") {
         let script = repo.join("scripts/install-macos-desktop.sh");
         run_command(
-            &repo,
+            repo,
             "bash",
             &[
                 script.to_string_lossy().as_ref(),
@@ -220,11 +247,11 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         )?;
     }
 
-    if let Some(agent) = install_macos_launch_agent(&repo, args.role)? {
+    if let Some(agent) = install_macos_launch_agent(repo, role)? {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 
-    match install_loop_unit_template(&repo)? {
+    match install_loop_unit_template(repo)? {
         Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
         None if cfg!(target_os = "macos") => {
             println!("macOS worker lifecycle is owned by its LaunchAgent.")
@@ -235,7 +262,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
              uses for supervised long-running processes."
         ),
     }
-    match install_watchdog_unit_template(&repo)? {
+    match install_watchdog_unit_template(repo)? {
         Some(watchdog_units) => {
             for unit in &watchdog_units {
                 println!("Installed watchdog unit: {}", unit.display());
@@ -251,85 +278,26 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     crate::factory::keep_services_off_after_update();
 
-    if args.restart_server && cfg!(target_os = "macos") {
+    if restart_server && cfg!(target_os = "macos") {
         let script = repo.join("scripts/macos-launchd.sh");
         run_command(
-            &repo,
+            repo,
             "bash",
             &[script.to_string_lossy().as_ref(), "start", "central"],
         )?;
         println!("Restarted macOS control-plane LaunchAgent.");
-    } else if args.restart_server {
-        run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
-        run_command(
-            &repo,
-            "sudo",
-            &["systemctl", "restart", &args.server_service],
-        )?;
-        run_command(
-            &repo,
-            "systemctl",
-            &["is-active", "--quiet", &args.server_service],
-        )?;
-        println!("Restarted service: {}", args.server_service);
-    } else if matches!(args.role, HostRole::Central | HostRole::Standalone)
-        && !cfg!(target_os = "macos")
+    } else if restart_server {
+        run_command(repo, "sudo", &["systemctl", "daemon-reload"])?;
+        run_command(repo, "sudo", &["systemctl", "restart", server_service])?;
+        run_command(repo, "systemctl", &["is-active", "--quiet", server_service])?;
+        println!("Restarted service: {}", server_service);
+    } else if matches!(role, HostRole::Central | HostRole::Standalone) && !cfg!(target_os = "macos")
     {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
         );
     }
     Ok(())
-}
-
-/// Install the one role-appropriate macOS service definition from the same
-/// updater used by first install and the desktop role control.
-fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<PathBuf>> {
-    if !cfg!(target_os = "macos") {
-        return Ok(None);
-    }
-    let script = repo.join("scripts/macos-launchd.sh");
-    if !script.is_file() {
-        bail!("macOS launchd installer is missing: {}", script.display());
-    }
-    let profile = if role == HostRole::Worker {
-        crate::config::load(None)
-            .ok()
-            .and_then(|config| {
-                let mut names: Vec<String> = config.profiles.into_keys().collect();
-                names.sort_unstable();
-                names.into_iter().next()
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let role_name = match role {
-        HostRole::Central => "central",
-        HostRole::Standalone => "standalone",
-        HostRole::Worker => "worker",
-    };
-    run_command(
-        repo,
-        "bash",
-        &[
-            script.to_string_lossy().as_ref(),
-            "install",
-            role_name,
-            repo.to_string_lossy().as_ref(),
-            &profile,
-        ],
-    )?;
-    let label = match role {
-        HostRole::Central | HostRole::Standalone => "dev.git-agent-harness.server.plist",
-        HostRole::Worker => "dev.git-agent-harness.worker.plist",
-    };
-    let target = env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is required to install a macOS LaunchAgent")?
-        .join("Library/LaunchAgents")
-        .join(label);
-    Ok(target.is_file().then_some(target))
 }
 
 /// Best-effort probe, not a hard dependency check: a missing `systemctl`
@@ -444,7 +412,13 @@ fn user_config_home() -> Result<PathBuf> {
 }
 
 fn copy_opencode_agent_configs(repo: &Path, config_home: &Path) -> Result<[PathBuf; 2]> {
-    let source_dir = repo.join("packaging/opencode/agents");
+    copy_opencode_agent_configs_from(&repo.join("packaging/opencode/agents"), config_home)
+}
+
+/// Issue #1416: the release path passes the extracted bundle's copy of
+/// `packaging/opencode/agents` here instead of the (possibly stale)
+/// checkout's, because release mode never runs `git pull`.
+fn copy_opencode_agent_configs_from(source_dir: &Path, config_home: &Path) -> Result<[PathBuf; 2]> {
     let target_dir = config_home.join("opencode/agents");
     create_dir_all(&target_dir)
         .with_context(|| format!("creating OpenCode agent directory {}", target_dir.display()))?;
@@ -547,25 +521,23 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
     Ok(Some(target))
 }
 
-/// Issue #896: build `apps/web` and deploy its `dist` to wherever the host's
-/// web server serves the dashboard from. The deploy root is configurable via
-/// `GAH_WEB_DEPLOY_ROOT`:
+/// Where to copy the built dashboard for a separate web server (issue #896),
+/// from `GAH_WEB_DEPLOY_ROOT`. The copy needs `sudo`.
 ///
-/// - unset -> `/var/www/gah` (a conventional static-site root; the operator
-///   MUST set this to the actual root of whatever web server serves the
-///   dashboard on this host, and the deploy prints the chosen root so a
-///   mismatch is visible)
+/// - unset -> `/var/www/gah` when that directory already exists (a host set
+///   up before #1327, serving it with Caddy or similar); otherwise no copy,
+///   and the GAH server serves the checkout's build without root
 /// - set to a non-empty path -> that path
-/// - set to empty -> skip deployment entirely
-///
-/// The web root is typically root-owned, so copying needs `sudo`.
+/// - set to empty -> no copy
 fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBuf>> {
-    let root = configured
+    let legacy = Path::new("/var/www/gah");
+    let Some(root) = configured
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/www/gah"));
-    if root.as_os_str().is_empty() {
+        .or_else(|| legacy.is_dir().then(|| legacy.to_path_buf()))
+        .filter(|root| !root.as_os_str().is_empty())
+    else {
         return Ok(None);
-    }
+    };
     if !root.is_absolute()
         || root == Path::new("/")
         || root.components().any(|part| part == Component::ParentDir)
@@ -601,11 +573,22 @@ const WEB_BUILD_ARGS: &[&str] = &["run", "--workspace=apps/web", "build"];
 /// operator-provided files in the root (favicon overrides, robots.txt, a
 /// web-server config file) survive the update.
 fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
+    // Always build: the server serves this directory when nothing is copied.
+    run_command(repo, "npm", WEB_BUILD_ARGS)?;
+    let dist = repo.join("apps/web/dist");
+    if !dist.join("index.html").is_file() {
+        bail!("web build did not produce apps/web/dist/index.html");
+    }
     let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
         return Ok(None);
     };
-    run_command(repo, "npm", WEB_BUILD_ARGS)?;
-    let dist = repo.join("apps/web/dist");
+    deploy_web_dist(repo, &dist, root_path)
+}
+
+/// Issue #1416: the release path calls this directly with the freshly
+/// extracted `apps/web/dist` instead of building it -- same deploy ordering
+/// and pruning, no npm.
+fn deploy_web_dist(repo: &Path, dist: &Path, root_path: PathBuf) -> Result<Option<PathBuf>> {
     if !dist.join("index.html").is_file() {
         bail!("web build did not produce apps/web/dist/index.html");
     }
@@ -658,7 +641,7 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
 
     // 3. Prune stale hashed assets. Best-effort: a prune hiccup must not
     //    fail the whole update after the new page is already live.
-    prune_stale_web_assets(repo, &root_path, &dist);
+    prune_stale_web_assets(repo, &root_path, dist);
 
     Ok(Some(root_path))
 }
@@ -1286,6 +1269,8 @@ mod tests {
             role: HostRole::Worker,
             restart_server: true,
             server_service: "gah-server.service".into(),
+            from_release: false,
+            release_manifest: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("--role central"));
@@ -1387,6 +1372,12 @@ mod tests {
         assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
+        // Unset copies only into a web root an earlier install created (#1327).
+        let legacy = Path::new("/var/www/gah");
+        assert_eq!(
+            resolve_web_deploy_root(None).unwrap(),
+            legacy.is_dir().then(|| legacy.to_path_buf())
+        );
     }
 
     /// Issue #1010: the production updater must build `apps/web` directly,

@@ -294,6 +294,39 @@ for normal review routing: use the ordered `review_candidates` pool and
 a weak reviewer `NEEDS_FIX` consumes the same post-review repair budget as
 any other `NEEDS_FIX` verdict.
 
+### Restricting a job kind to named models
+
+`allowed_models` is a strict, per-profile allow-list keyed by job kind
+(`improve`, `fix`, `experiment`, `pm`, `review`, `research`, `audit`,
+`estimate`). A kind with an entry only ever runs on the listed backend/model
+pairs: the list replaces that kind's candidate pool and task routing rules,
+an explicit `--backend`/`--model` outside it is refused, and review
+escalation skips reviewers that are not on it. When none of the listed
+models is available the job waits; it never falls back to another model.
+Kinds without an entry keep their ordinary pools.
+
+- **Retries.** A retry or escalation of an `improve` job runs as `fix`, so
+  `fix` without a list of its own is held to the `improve` list. Once every
+  listed model has been tried, the job tries them again rather than failing.
+- **Entries.** An entry without `model` allows every model of that backend,
+  and its `requires_approval`, `quota_pool` and `instance` apply to whichever
+  model runs. An entry that names the model wins over it. An entry with
+  `instance` admits that account only.
+- **Merging.** A profile list replaces the canonical list for the same kind.
+  An empty profile list changes nothing; it does not lift a canonical
+  restriction.
+- **Mistakes stop routing.** An unknown job kind, two keys for one kind
+  (`implement` is an alias of `improve`) or an undeclared `instance` is
+  reported by `gah doctor`, and no job on the profile is routed until it is
+  fixed.
+
+```toml
+[[profiles.my-repo.routing.allowed_models.review]]
+backend = "claude"
+model = "opus"
+included_in_quota = true
+```
+
 ### Subscription routing setup
 
 For a profile that should use several subscription-backed workers, configure

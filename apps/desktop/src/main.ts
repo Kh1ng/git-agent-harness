@@ -8,6 +8,42 @@ type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
 type WorkerStatus = { running: boolean; note: string; tools: { name: string; environment: string; installed: boolean }[] };
 type RoleStatus = { role: 'central' | 'worker'; running: boolean; supported: boolean };
+type DesktopUpdateStatus = { available: boolean; currentVersion: string; version: string | null; notes: string | null; error: string | null };
+
+/** Issue #1416: the signed release feed's verdict, shown as a non-blocking
+ * Settings row. A missing signing key or unreachable feed reads as "not
+ * configured" -- never an error dialog. */
+function showDesktopUpdate(status: DesktopUpdateStatus): void {
+  const text = document.querySelector<HTMLElement>('#desktop-update-status')!;
+  const apply = document.querySelector<HTMLButtonElement>('#desktop-update-apply')!;
+  if (status.available && status.version) {
+    text.textContent = `Update available · v${status.currentVersion} → v${status.version} — Restart to update.`;
+    apply.hidden = false;
+  } else if (status.error) {
+    text.textContent = status.error.includes('not configured')
+      ? 'Automatic updates are not configured on this computer; the app still updates via setup.'
+      : `Cannot check for updates: ${status.error}`;
+    apply.hidden = true;
+  } else {
+    text.textContent = `This app is up to date (v${status.currentVersion}).`;
+    apply.hidden = true;
+  }
+}
+
+async function loadDesktopUpdate(): Promise<void> {
+  showDesktopUpdate(await invoke<DesktopUpdateStatus>('desktop_update_status'));
+}
+
+document.querySelector('#desktop-update-apply')!.addEventListener('click', () => {
+  const apply = document.querySelector<HTMLButtonElement>('#desktop-update-apply')!;
+  apply.disabled = true;
+  document.querySelector<HTMLElement>('#desktop-update-status')!.textContent = 'Downloading and installing the update…';
+  void invoke('desktop_apply_update').catch((error: unknown) => {
+    apply.disabled = false;
+    document.querySelector<HTMLElement>('#desktop-update-status')!.textContent =
+      `The update failed: ${error instanceof Error ? error.message : String(error)}`;
+  });
+});
 bindRepositoryTools(document.querySelector<HTMLElement>('#repository-tools')!, invoke);
 const central = document.querySelector<HTMLInputElement>('#central-url')!;
 const distribution = document.querySelector<HTMLInputElement>('#wsl-distribution')!;
@@ -25,6 +61,11 @@ const showProviderConnection = bindProviderConnections(document.querySelector<HT
 void listen<MistralLoginResult>('gah:mistral-login', event => {
   showMistralLogin(event.payload);
   showProviderConnection(event.payload);
+}).catch(() => {});
+// The launch and periodic update checks (issue #1416) push the same status
+// the Settings row loads on demand.
+void listen<DesktopUpdateStatus>('gah:desktop-update', event => {
+  showDesktopUpdate(event.payload);
 }).catch(() => {});
 
 function showPresence(presence: Presence) {
@@ -285,4 +326,5 @@ void perform(async () => {
   nodeRole = role.role;
   // On Windows, setup and gah live in the selected WSL distribution.
   await refreshSetup();
+  await loadDesktopUpdate();
 });
