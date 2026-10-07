@@ -1478,3 +1478,6 @@ mod repository_scope;
 
 #[path = "tests/control_records.rs"]
 mod control_records;
+
+#[path = "tests/early_failure.rs"]
+mod early_failure;

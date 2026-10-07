@@ -322,10 +322,10 @@ pub(super) fn acquire_claim(
     cfg: &GahConfig,
     profile: &Profile,
     args: &DispatchArgs,
-) -> Result<Option<crate::central_claims::ClaimGuard>> {
+) -> Result<(Option<crate::central_claims::ClaimGuard>, Option<String>)> {
     let central_url = cfg.defaults.registry_central_url.clone();
     let Some(work_id) = check_duplicate_work(cfg, profile, args, central_url.is_some())? else {
-        return Ok(None);
+        return Ok((None, None));
     };
 
     if let Some(central_url) = &central_url {
@@ -339,7 +339,7 @@ pub(super) fn acquire_claim(
             &work_id,
             token.as_deref(),
         )?;
-        return Ok(Some(guard));
+        return Ok((Some(guard), Some(work_id)));
     }
 
     // Parallel workers: claim this work_id immediately, before any backend
@@ -350,7 +350,17 @@ pub(super) fn acquire_claim(
     if let Err(e) = ledger::append(cfg, &claim) {
         eprintln!("warning: failed to append claim ledger entry: {e:#}");
     }
-    Ok(None)
+    Ok((None, Some(work_id)))
+}
+
+/// Issue #1460: a direct dispatch that fails before the workflow resolves
+/// its work identity would write a terminal entry with no work id, so the
+/// claim taken for it could never be resolved. Give that entry the claimed
+/// work id. An entry that already has a work id is left alone.
+pub(super) fn stamp_claimed_work_id(ledger: &mut LedgerEntry, claimed_work_id: Option<String>) {
+    if ledger.work_id.is_none() {
+        ledger.work_id = claimed_work_id;
+    }
 }
 
 type TicketHistoryLookup = (
