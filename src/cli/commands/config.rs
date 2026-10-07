@@ -62,6 +62,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             telegram_chat_id,
             worker_memory_mib,
             memory_floor_mib,
+            worker_cpu_cores,
+            cpu_ceiling_percent,
         } => {
             let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
                 config::load(config_path.as_deref())?
@@ -115,6 +117,12 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             }
             if let Some(value) = memory_floor_mib {
                 cfg.defaults.node_capacity.memory_floor_mib = value;
+            }
+            if let Some(value) = worker_cpu_cores {
+                cfg.defaults.node_capacity.worker_cpu_cores = value;
+            }
+            if let Some(value) = cpu_ceiling_percent {
+                cfg.defaults.node_capacity.cpu_ceiling_percent = value;
             }
             if cfg.defaults.node_capacity != previous_capacity {
                 if let Some(total) = crate::controller::node_total_memory_bytes() {

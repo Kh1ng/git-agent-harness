@@ -1018,6 +1018,7 @@ export interface ConfigSummary {
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
   node_capacity?: NodeCapacitySettings;
+  node_resources?: NodeResources;
   /** Issue #653: notification channel settings (no secrets — credentials
    * live in the environment). Optional while schema-v1 clients may still
    * be connected to an older server. */
@@ -1027,6 +1028,22 @@ export interface ConfigSummary {
 export interface NodeCapacitySettings {
   worker_memory_mib: number;
   memory_floor_mib: number;
+  /** CPU cores one implementation-class worker reserves. Absent on CLIs
+   * that only know the memory settings. */
+  worker_cpu_cores?: number;
+  /** Percent of the node's logical CPUs that load plus reservations may
+   * reach before another worker waits. */
+  cpu_ceiling_percent?: number;
+}
+
+/** What admission measures against on the node, shown beside the limits. */
+export interface NodeResources {
+  memory_total_mib: number;
+  memory_available_mib: number;
+  logical_cpus: number;
+  load_one: number;
+  /** Inside WSL the totals are what Windows grants the VM, not the host's. */
+  wsl: boolean;
 }
 
 /** Issue #1380: smallest accepted value for both node-capacity settings, in
@@ -1036,10 +1053,15 @@ export const NODE_CAPACITY_MIN_MIB = 512;
 
 /** Issue #1380: default node-capacity settings. A `memory_floor_mib` of 0
  * keeps the adaptive floor of max(2048 MiB, total memory / 6). */
-export const NODE_CAPACITY_DEFAULTS: NodeCapacitySettings = {
+export const NODE_CAPACITY_DEFAULTS: Required<NodeCapacitySettings> = {
   worker_memory_mib: 4096,
   memory_floor_mib: 0,
+  worker_cpu_cores: 2,
+  cpu_ceiling_percent: 90,
 };
+
+/** Accepted ranges for the CPU settings; the Rust side enforces the same. */
+export const NODE_CAPACITY_CPU_LIMITS = { cores: [1, 64], ceiling_percent: [10, 400] } as const;
 
 /** Issue #653: notification channel settings projection. */
 export interface NotificationSettingsSummary {
@@ -1235,6 +1257,8 @@ export interface ConfigSetData {
   current_manager?: string | null;
   worker_memory_mib?: number;
   memory_floor_mib?: number;
+  worker_cpu_cores?: number;
+  cpu_ceiling_percent?: number;
   /** Issue #653: none | telegram | discord. Credentials come from the
    * environment (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL), never config. */
   notification_channel?: 'none' | 'telegram' | 'discord';

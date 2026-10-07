@@ -17,6 +17,13 @@ pub struct NodeCapacitySettings {
     pub worker_memory_mib: u64,
     /// Zero retains the adaptive floor of max(2048 MiB, total memory / 6).
     pub memory_floor_mib: u64,
+    /// CPU cores one implementation, fix, retry, or escalation worker
+    /// reserves. Lighter work keeps its fixed fractions.
+    pub worker_cpu_cores: u32,
+    /// Share of the node's logical CPUs that load plus reservations may
+    /// reach before another worker is deferred. Above 100 admits more
+    /// workers than cores, which suits agents that mostly wait on a model.
+    pub cpu_ceiling_percent: u32,
 }
 
 impl Default for NodeCapacitySettings {
@@ -24,11 +31,19 @@ impl Default for NodeCapacitySettings {
         Self {
             worker_memory_mib: 4096,
             memory_floor_mib: 0,
+            worker_cpu_cores: 2,
+            cpu_ceiling_percent: 90,
         }
     }
 }
 
 impl NodeCapacitySettings {
+    /// Load plus reservations admission tolerates on a node with
+    /// `logical_cpus` CPUs; never below one core.
+    pub fn cpu_ceiling(self, logical_cpus: usize) -> f64 {
+        (logical_cpus.max(1) as f64 * f64::from(self.cpu_ceiling_percent) / 100.0).max(1.0)
+    }
+
     pub fn floor_description(self) -> String {
         if self.memory_floor_mib == 0 {
             format!("max({ADAPTIVE_FLOOR_MIN_MIB} MiB, total / 6)")
@@ -60,6 +75,14 @@ impl NodeCapacitySettings {
         anyhow::ensure!(
             self.worker_memory_mib <= u64::MAX / MIB && self.memory_floor_mib <= u64::MAX / MIB,
             "node_capacity memory value is too large"
+        );
+        anyhow::ensure!(
+            (1..=64).contains(&self.worker_cpu_cores),
+            "node_capacity.worker_cpu_cores must be between 1 and 64"
+        );
+        anyhow::ensure!(
+            (10..=400).contains(&self.cpu_ceiling_percent),
+            "node_capacity.cpu_ceiling_percent must be between 10 and 400"
         );
         Ok(())
     }
@@ -125,6 +148,45 @@ mod tests {
         ] {
             assert!(settings.validate().is_err());
         }
+    }
+
+    #[test]
+    fn cpu_defaults_and_ranges() {
+        let defaults = NodeCapacitySettings::default();
+        assert_eq!(defaults.worker_cpu_cores, 2);
+        assert_eq!(defaults.cpu_ceiling_percent, 90);
+        for (cores, percent, valid) in [
+            (1, 10, true),
+            (64, 400, true),
+            (0, 90, false),
+            (65, 90, false),
+            (2, 9, false),
+            (2, 401, false),
+        ] {
+            let settings = NodeCapacitySettings {
+                worker_cpu_cores: cores,
+                cpu_ceiling_percent: percent,
+                ..defaults
+            };
+            assert_eq!(
+                settings.validate().is_ok(),
+                valid,
+                "{cores} cores, {percent}%"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_keys_round_trip_and_default_when_absent() {
+        let old_config: NodeCapacitySettings = toml::from_str("worker_memory_mib = 1536").unwrap();
+        assert_eq!(old_config.worker_cpu_cores, 2);
+        assert_eq!(old_config.cpu_ceiling_percent, 90);
+        let settings: NodeCapacitySettings =
+            toml::from_str("worker_cpu_cores = 4\ncpu_ceiling_percent = 150").unwrap();
+        let restored: NodeCapacitySettings =
+            toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.worker_cpu_cores, 4);
+        assert_eq!(restored.cpu_ceiling_percent, 150);
     }
 
     #[test]
