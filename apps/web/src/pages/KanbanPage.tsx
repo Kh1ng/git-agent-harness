@@ -153,14 +153,16 @@ function WhyPanel({ board, card, now, onClose, onOpenWork, assign }: { board: Ka
             <h4 className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">Factory-wide</h4>
             <ul className="mt-1 space-y-1">{board.gates.map((gate) => <Verdict key={`${gate.label}-${gate.detail}`} ok={gate.ok}>{gate.label}: {gate.detail}</Verdict>)}</ul>
             <h4 className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">Each agent</h4>
-            {card.job === 'merge' || card.column === 'needs_you'
+            {card.column === 'needs_you'
               ? (
                 <>
                   <p className="mt-1 text-xs text-secondary">No agent will pick this one up on its own: it waits for you.{assign && card.workId && ' You can hand it to an agent:'}</p>
                   {assign && card.workId && <AssignControl key={card.key} card={card} agents={board.agents} assign={assign} />}
                 </>
               )
-              : <ul className="mt-1 space-y-1">{whyNotRunning(board, card).map(({ agent, ok, verdict }) => <Verdict key={agent.id} ok={ok}><span className="text-primary">{agent.name}</span>: {verdict}</Verdict>)}</ul>}
+              : card.job === 'merge'
+                ? <p className="mt-1 text-xs text-secondary">The controller handles this step; it does not need a coding agent.</p>
+                : <ul className="mt-1 space-y-1">{whyNotRunning(board, card).map(({ agent, ok, verdict }) => <Verdict key={agent.id} ok={ok}><span className="text-primary">{agent.name}</span>: {verdict}</Verdict>)}</ul>}
           </>
         )}
       </div>

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 import type { AvailableTicket, ControllerActivity, DeviceAgent, MergeRequest, QuotaCandidateStatus, StatusSnapshot } from '@git-agent-harness/contracts';
-import { buildKanban, parseSkipped, runSkipped, workingNow, type KanbanInput } from '../../src/lib/kanbanBoard.js';
+import { buildKanban, parseSkipped, runSkipped, workingNow, whyNotRunning, type KanbanInput } from '../../src/lib/kanbanBoard.js';
 import { WorkingNowMenu } from '../../src/components/WorkingNowMenu.js';
 import { KanbanView } from '../../src/pages/KanbanPage.js';
 
@@ -102,7 +102,8 @@ test('the list on the run record is used as recorded, whatever the sentence says
     outcome: 'review: the router rewrote this sentence and names nobody',
     skipped: [{ backend: 'agy', backend_instance: 'agy:google-native', model: 'Gemini 3.1 Pro (High)', reason: 'max_concurrent_reached', unavailable_until: null }]
   };
-  expect(runSkipped(run)).toEqual([{ backend: 'agy', model: 'Gemini 3.1 Pro (High)', reason: 'max_concurrent_reached' }]);
+  expect(runSkipped(run)).toEqual([{ backend: 'agy', backendInstance: 'agy:google-native', model: 'Gemini 3.1 Pro (High)', reason: 'max_concurrent_reached' }]);
+  expect(runSkipped({ outcome: controllerRuns[1].outcome, skipped: [] })).toEqual([]);
   // A run recorded before the list existed still reads the sentence.
   expect(runSkipped({ outcome: controllerRuns[1].outcome })).toHaveLength(2);
 
@@ -173,14 +174,59 @@ test('a waiting card answers why it is not running, agent by agent', async ({ mo
   await expect(why).toHaveCount(0);
 });
 
-// #5 without the stuck-loop stop: approved and waiting for a merge decision.
+// #5 without the stuck-loop stop, under an explicitly manual merge policy.
 const approvedBoard = buildKanban({
   ...input,
   status: {
     ...status,
+    profile: { ...status.profile, merge_policy: 'stop_for_human' },
     available_tickets: status.available_tickets.map((item) => (item.work_id === '#5' ? ticket('#5', { has_active_mr: true }) : item)),
     blocked_work_items: []
   } as StatusSnapshot
+});
+
+test('a skipped subscription does not block another account using the same backend', () => {
+  const scoped = buildKanban({
+    ...input,
+    factoryAgents: [],
+    quota: { candidates: [
+      candidate('claude', 'opus', ['review'], { backend_instance: 'claude-first' }),
+      candidate('claude', 'opus', ['review'], { backend_instance: 'claude-second' })
+    ] },
+    controllerRuns: [{ ...controllerRuns[1], skipped: [{ backend: 'claude', backend_instance: 'claude-first', model: 'opus', reason: 'authentication_error' }] }]
+  });
+  const verdicts = whyNotRunning(scoped, scoped.cards.find((card) => card.workId === '#3')!);
+  expect(verdicts.find(({ agent }) => agent.id === 'claude-first')?.verdict).toContain('Sign-in failed');
+  expect(verdicts.find(({ agent }) => agent.id === 'claude-second')).toMatchObject({ ok: true, verdict: 'Available' });
+  expect(scoped.agents.find((agent) => agent.id === 'claude-second')?.reason).not.toContain('passed over');
+});
+
+test('approved PRs follow controller lifecycle gates rather than always needing a human', async ({ mount }) => {
+  const approved = (fields: Partial<MergeRequest>, snapshot: Partial<StatusSnapshot> = {}) => buildKanban({
+    ...input,
+    controllerRuns: [],
+    factoryAgents: [],
+    status: {
+      ...status,
+      profile: { ...status.profile, merge_policy: 'squash' },
+      available_tickets: [], active_claims: [], blocked_work_items: [],
+      publishing_allow_pr: true,
+      merge_requests: [mergeRequest('#8', 'READY_FOR_HUMAN', fields)],
+      ...snapshot
+    }
+  });
+  const automatic = approved({});
+  expect(automatic.cards[0]).toMatchObject({ column: 'review', job: 'merge', reason: 'Approved and CI passed: waiting for the controller to merge' });
+  expect(approved({ ci_passed: false, ci_pending: true }).cards[0]).toMatchObject({ column: 'waiting', reason: 'Approved: waiting for CI to finish before merging' });
+  expect(approved({}, { review_held_work_ids: ['#8'] }).cards[0]).toMatchObject({ column: 'waiting', held: true });
+  expect(approved({ draft: true }).cards[0]).toMatchObject({ column: 'review', reason: 'Approved: waiting for the controller to mark the draft ready' });
+  expect(approved({}, { publishing_allow_pr: false }).cards[0]).toMatchObject({ column: 'needs_you' });
+  expect(approvedBoard.cards.find((card) => card.workId === '#5')).toMatchObject({ column: 'needs_you' });
+
+  const component = await mount(<KanbanView board={automatic} now={NOW} onOpenWork={() => {}} assign={{ unavailable: null, send: () => {} }} />);
+  await component.getByRole('button', { name: /PR 98/ }).click();
+  await expect(component.getByText('The controller handles this step; it does not need a coding agent.')).toBeVisible();
+  await expect(component.getByRole('button', { name: 'Assign' })).toHaveCount(0);
 });
 
 test('Assign is off, with the reason shown, on a job held by a gate a manual fix does not lift', async ({ mount }) => {

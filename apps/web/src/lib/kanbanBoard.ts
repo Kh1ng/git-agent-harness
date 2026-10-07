@@ -26,6 +26,7 @@ export type KanbanTone = 'good' | 'warning' | 'critical' | 'unknown';
 
 export interface KanbanSkip {
   backend: string;
+  backendInstance?: string | null;
   model: string | null;
   /** The router's own word for it: max_concurrent_reached, authentication_error… */
   reason: string;
@@ -128,7 +129,7 @@ function plainSkip(reason: string): { short: string; long: string } {
  * recorded before it did only has the sentence, read by `parseSkipped`.
  */
 export function runSkipped(run: Pick<ControllerActivity, 'skipped' | 'outcome'>): KanbanSkip[] {
-  if (run.skipped?.length) return run.skipped.map((skip) => ({ backend: skip.backend, model: skip.model ?? null, reason: skip.reason }));
+  if (run.skipped) return run.skipped.map((skip) => ({ backend: skip.backend, backendInstance: skip.backend_instance, model: skip.model ?? null, reason: skip.reason }));
   return parseSkipped(run.outcome);
 }
 
@@ -348,11 +349,33 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
       const waitingOn = skipped.length ? `: ${skippedSummary(skipped)}` : '';
       switch (mergeRequest.classification) {
         case 'READY_FOR_HUMAN':
-          column = 'needs_you';
           job = 'merge';
-          reason = lastOutcome ?? 'Approved: waiting for your merge decision';
-          tone = 'warning';
-          blocks.push(reason);
+          // The classification is a review verdict, not a human handoff.
+          // Follow the controller's lifecycle gates before claiming it needs a person.
+          if (held.has(key)) {
+            column = 'waiting';
+            reason = 'Approved: waiting for the review hold to be released';
+          } else if (mergeRequest.ci_passed && mergeRequest.draft) {
+            column = 'review';
+            reason = 'Approved: waiting for the controller to mark the draft ready';
+          } else if (status?.profile.merge_policy === 'stop_for_human') {
+            column = 'needs_you';
+            reason = 'Approved: merge policy requires your merge decision';
+          } else if (!mergeRequest.ci_passed && mergeRequest.ci_pending) {
+            column = 'waiting';
+            reason = 'Approved: waiting for CI to finish before merging';
+          } else if (!mergeRequest.ci_passed) {
+            column = 'needs_you';
+            reason = 'Approved, but CI has not passed: needs a merge decision';
+          } else if (status?.publishing_allow_pr === false) {
+            column = 'needs_you';
+            reason = 'Approved, but publishing policy requires a human handoff';
+          } else {
+            column = 'review';
+            reason = lastOutcome ?? 'Approved and CI passed: waiting for the controller to merge';
+          }
+          tone = column === 'review' ? 'good' : 'warning';
+          if (column !== 'review') blocks.push(reason);
           break;
         case 'NEEDS_FIX':
         case 'CI_FAILED':
@@ -451,6 +474,8 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
 const JOB_MODES: Record<KanbanJob, string[]> = { build: ['improve', 'fix'], fix: ['improve', 'fix'], review: ['review'], merge: [] };
 const JOB_NOUN: Record<KanbanJob, string> = { build: 'building', fix: 'fix', review: 'review', merge: 'merge' };
 const canDo = (agent: Pick<KanbanAgent, 'modes'>, job: KanbanJob) => agent.modes.length === 0 || JOB_MODES[job].length === 0 || JOB_MODES[job].some((mode) => agent.modes.includes(mode));
+/** A recorded route failure belongs to its subscription, not every account using that backend. */
+const skippedAgent = (skip: KanbanSkip, agent: KanbanAgent) => skip.backendInstance ? skip.backendInstance === agent.id : skip.backend === agent.backend;
 
 function plainUnavailable(reason: string | null, until: string | null, now: number): string {
   const back = formatUntil(until, now);
@@ -537,8 +562,8 @@ function buildAgents(input: KanbanInput, cards: KanbanCard[], factoryAgents: Dev
       const kinds = [...new Set(idleCards.map((card) => JOB_NOUN[card.job!]))].join(' and ');
       agent.reason = `Idle: only ${kinds} jobs are waiting, and it is not set up for those`;
     } else {
-      const passedOver = takeable.find((card) => card.skipped.some((item) => item.backend === agent.backend));
-      const skip = passedOver?.skipped.find((item) => item.backend === agent.backend);
+      const passedOver = takeable.find((card) => card.skipped.some((item) => skippedAgent(item, agent)));
+      const skip = passedOver?.skipped.find((item) => skippedAgent(item, agent));
       agent.reason = passedOver && skip
         ? `Idle: passed over for ${passedOver.workId ?? passedOver.title} (${plainSkip(skip.reason).short})`
         : "Free: picks up work on the loop's next pass";
@@ -561,7 +586,7 @@ export interface KanbanVerdict {
 /** "Why isn't this running?": each agent with the rule that keeps it off this card. */
 export function whyNotRunning(board: KanbanBoard, card: KanbanCard): KanbanVerdict[] {
   return board.agents.map((agent) => {
-    const skip = card.skipped.find((item) => item.backend === agent.backend);
+    const skip = card.skipped.find((item) => skippedAgent(item, agent));
     if (card.job && !canDo(agent, card.job)) return { agent, ok: false, verdict: `Not set up for ${JOB_NOUN[card.job]} jobs` };
     if (skip) return { agent, ok: false, verdict: `${plainSkip(skip.reason).long}${skip.model ? ` (${skip.model})` : ''}` };
     if (agent.state === 'unavailable') return { agent, ok: false, verdict: agent.reason };
