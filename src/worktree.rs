@@ -689,36 +689,44 @@ pub fn diff_stats(worktree: &Path, target_branch: &str) -> Result<DiffStats> {
     Ok(stats)
 }
 
-#[allow(dead_code)]
-pub fn commit_and_push(
-    worktree: &Path,
-    branch: &str,
-    push_url: &str,
-    repo_id: &str,
-    pat: &str,
-) -> Result<()> {
-    stage_all(worktree)?;
-    ensure_staged(worktree)?;
-    commit_msg(
-        worktree,
-        &format!("gah: improve mode changes for {}", repo_id),
-    )?;
-    push_branch(worktree, branch, push_url, pat)
+/// Environment variable that carries the PAT to the askpass script.
+const ASKPASS_SECRET_ENV: &str = "GAH_ASKPASS_SECRET";
+
+/// Write a private GIT_ASKPASS script for one git invocation. The script
+/// holds no secret: it prints `$GAH_ASKPASS_SECRET`, which the caller sets on
+/// the git command. The file has a unique name (concurrent controller
+/// workers share a pid), is created 0700 with O_EXCL, and is deleted when the
+/// returned handle drops.
+fn write_askpass() -> Result<tempfile::TempPath> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut file = tempfile::Builder::new()
+        .prefix("gah-askpass-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempfile()
+        .context("create askpass script")?;
+    file.write_all(format!("#!/bin/sh\nprintf '%s\\n' \"${ASKPASS_SECRET_ENV}\"\n").as_bytes())?;
+    file.flush()?;
+    Ok(file.into_temp_path())
 }
 
-/// Write a temporary GIT_ASKPASS script that outputs the given password.
-/// Returns the path to the script. The caller MUST clean up the file.
-fn write_askpass(pat: &str) -> Result<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!("gah-askpass-{}", std::process::id()));
-    let mut f = std::fs::File::create(&path)?;
-    f.write_all(b"#!/bin/sh\n")?;
-    f.write_all(b"echo \"")?;
-    f.write_all(pat.as_bytes())?;
-    f.write_all(b"\"\n")?;
-    // Make executable
-    use std::os::unix::fs::PermissionsExt;
-    f.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-    Ok(path)
+/// Refuse to publish onto the branch work is meant to merge into. A fix run
+/// on a PR whose head is `main` (common for fork PRs), or an
+/// `--existing-branch main`, would otherwise push agent output straight to
+/// the default branch. A refspec (`src:dst`) could name any destination.
+fn ensure_publishable_branch(branch: &str, target_branch: &str) -> Result<()> {
+    let name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    let target = target_branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(target_branch);
+    if name.is_empty() || name.contains(':') || name.starts_with('+') || name.starts_with('-') {
+        anyhow::bail!("refusing to push: {branch:?} is not a plain branch name");
+    }
+    if name == target {
+        anyhow::bail!(
+            "refusing to push: {branch:?} is the target branch; gah publishes only to work branches"
+        );
+    }
+    Ok(())
 }
 
 pub fn stage_all(worktree: &Path) -> Result<()> {
@@ -814,7 +822,14 @@ pub fn delete_local_branch(repo: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn push_branch(worktree: &Path, branch: &str, push_url: &str, pat: &str) -> Result<()> {
+pub fn push_branch(
+    worktree: &Path,
+    branch: &str,
+    target_branch: &str,
+    push_url: &str,
+    pat: &str,
+) -> Result<()> {
+    ensure_publishable_branch(branch, target_branch)?;
     push_branch_with_executable(Path::new("git"), worktree, branch, push_url, pat)
 }
 
@@ -825,11 +840,12 @@ fn push_branch_with_executable(
     push_url: &str,
     pat: &str,
 ) -> Result<()> {
-    let askpass = write_askpass(pat)?;
+    let askpass = write_askpass()?;
     let result = retry_transient_git_network("push", || {
         let child = Command::new(executable)
             .args(["push", "-q", push_url, branch])
             .env("GIT_ASKPASS", &askpass)
+            .env(ASKPASS_SECRET_ENV, pat)
             .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(worktree)
             .stdout(Stdio::piped())
@@ -845,7 +861,7 @@ fn push_branch_with_executable(
         }
         Ok(())
     });
-    let _ = std::fs::remove_file(&askpass);
+    drop(askpass);
     result
 }
 
@@ -870,11 +886,12 @@ fn delete_remote_branch_with_executable(
     push_url: &str,
     pat: &str,
 ) -> Result<()> {
-    let askpass = write_askpass(pat)?;
+    let askpass = write_askpass()?;
     let result = retry_transient_git_network("push --delete", || {
         let child = Command::new(executable)
             .args(["push", "-q", push_url, "--delete", branch])
             .env("GIT_ASKPASS", &askpass)
+            .env(ASKPASS_SECRET_ENV, pat)
             .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(worktree)
             .stdout(Stdio::piped())
@@ -893,22 +910,8 @@ fn delete_remote_branch_with_executable(
         }
         Ok(())
     });
-    let _ = std::fs::remove_file(&askpass);
+    drop(askpass);
     result
-}
-
-#[allow(dead_code)]
-pub fn commit_and_push_msg(
-    worktree: &Path,
-    branch: &str,
-    push_url: &str,
-    msg: &str,
-    pat: &str,
-) -> Result<()> {
-    stage_all(worktree)?;
-    ensure_staged(worktree)?;
-    commit_msg(worktree, msg)?;
-    push_branch(worktree, branch, push_url, pat)
 }
 
 pub fn cleanup(worktree: &Path, repo: &Path) {

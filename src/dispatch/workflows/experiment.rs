@@ -318,7 +318,13 @@ pub(crate) fn experiment(
     classify_git_operation_result(
         ledger,
         crate::ledger::FailureStage::Push,
-        worktree::push_branch(&wt, &branch, &push_url, &push_pat),
+        worktree::push_branch(
+            &wt,
+            &branch,
+            &profile.default_target_branch,
+            &push_url,
+            &push_pat,
+        ),
     )?;
     ledger.push_succeeded = true;
 

@@ -344,9 +344,55 @@ fn push_branch_fails_loudly_for_unreachable_remote() {
     init_bare_repo_with_main(&repo);
     let bogus_remote = tmp.path().join("does-not-exist-as-a-remote");
 
-    let err = push_branch(&repo, "main", bogus_remote.to_str().unwrap(), "").unwrap_err();
+    let err = push_branch(&repo, "work", "main", bogus_remote.to_str().unwrap(), "").unwrap_err();
 
     assert!(format!("{:#}", err).contains("push failed"));
+}
+
+#[test]
+fn push_branch_refuses_the_target_branch_and_refspecs() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_bare_repo_with_main(&repo);
+    let remote = tmp.path().join("origin.git");
+    for (branch, target) in [
+        ("main", "main"),
+        ("refs/heads/main", "main"),
+        ("main", "refs/heads/main"),
+        ("HEAD:main", "main"),
+        ("gah/x:release", "main"),
+        ("+gah/x", "main"),
+    ] {
+        let err = push_branch(&repo, branch, target, remote.to_str().unwrap(), "").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing to push"),
+            "{branch} -> {target}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn askpass_prints_the_secret_verbatim_and_is_private_and_unique() {
+    use std::os::unix::fs::PermissionsExt;
+    let secret = "p\"a$s`w'o;rd $(touch /nonexistent)";
+    let first = write_askpass().unwrap();
+    let second = write_askpass().unwrap();
+    assert_ne!(first.to_path_buf(), second.to_path_buf());
+    let mode = fs::metadata(&first).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    assert!(!fs::read_to_string(&first).unwrap().contains(secret));
+    let out = StdCommand::new(&first)
+        .env(ASKPASS_SECRET_ENV, secret)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{secret}\n")
+    );
+    let path = first.to_path_buf();
+    drop(first);
+    assert!(!path.exists(), "askpass script is removed when dropped");
 }
 
 // ── create_existing() ─────────────────────────────────────────────────────
@@ -445,7 +491,14 @@ fn create_existing_checks_out_a_real_local_branch_not_detached_head() {
         .current_dir(&wt)
         .output()
         .unwrap();
-    push_branch(&wt, "test-branch", bare_origin.to_str().unwrap(), "").unwrap();
+    push_branch(
+        &wt,
+        "test-branch",
+        "main",
+        bare_origin.to_str().unwrap(),
+        "",
+    )
+    .unwrap();
 
     let log = StdCommand::new("git")
         .args(["log", "--oneline", "refs/heads/test-branch"])
