@@ -227,6 +227,8 @@ pub struct ConfigProfileSummary {
     pub improve_candidates: Vec<RoutingCandidateSummary>,
     pub review_candidates: Vec<RoutingCandidateSummary>,
     pub task_routing_rules: Vec<TaskRoutingRuleSummary>,
+    /// Strict allow-lists by job kind; a kind without an entry is open.
+    pub allowed_models: BTreeMap<String, Vec<RoutingCandidateSummary>>,
     pub routine_reviewer: Option<RoutingCandidateSummary>,
     pub escalatory_reviewers: Vec<RoutingCandidateSummary>,
     pub context: ConfigProfileContextSummary,
@@ -378,20 +380,9 @@ fn build_profile_summary(
         .collect();
 
     let mut routed_backends: Vec<&str> = routing
-        .pm_candidates
-        .iter()
-        .flatten()
-        .chain(routing.improve_candidates.iter().flatten())
-        .chain(routing.review_candidates.iter().flatten())
-        .chain(
-            routing
-                .task_routing_rules
-                .iter()
-                .flat_map(|rule| rule.candidates.iter()),
-        )
-        .map(|candidate| candidate.backend.as_str())
-        .chain(routine_reviewer.iter().map(|c| c.backend.as_str()))
-        .chain(escalatory_reviewers.iter().map(|c| c.backend.as_str()))
+        .labeled_candidates()
+        .into_iter()
+        .map(|(_, candidate)| candidate.backend.as_str())
         .collect();
     routed_backends.sort_unstable();
     routed_backends.dedup();
@@ -422,6 +413,11 @@ fn build_profile_summary(
         improve_candidates,
         review_candidates,
         task_routing_rules,
+        allowed_models: routing
+            .allowed_models
+            .iter()
+            .map(|(kind, list)| (kind.clone(), list.iter().map(to_summary).collect()))
+            .collect(),
         routine_reviewer: routine_reviewer.as_ref().map(to_summary),
         escalatory_reviewers: escalatory_reviewers
             .iter()

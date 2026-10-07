@@ -53,6 +53,9 @@ test('lists the coordinator, controller devices, and workers', async ({ mount, p
   const component = await mount(<WebSocketProvider><NodesPage /></WebSocketProvider>);
   await expect(component.getByRole('heading', { name: 'Coordinator' })).toBeVisible();
   await expect(component.getByText('GAH Coordinator', { exact: true })).toBeVisible();
+  // The coordinator's self-reported address is often loopback; only its name, ID and version are listed.
+  await expect(component.getByText('https://central.example.com')).toHaveCount(0);
+  await expect(component.getByText('central · v0.1.2')).toBeVisible();
   await expect(component.getByRole('heading', { name: 'Controller devices' })).toBeVisible();
   await expect(component.getByText("Colton's MacBook", { exact: true })).toBeVisible();
   await expect(component.getByText('Old phone', { exact: true })).toHaveCount(0);
@@ -97,11 +100,14 @@ test('fleet lists unknown, stale and classified health; click checks health and 
   await expect(component.getByText('Stale — last result: healthy')).toBeVisible();
   await expect(component.getByText('Unhealthy — auth failed')).toBeVisible();
   await expect(component.getByText('AUTH: Node returned HTTP 401')).toBeVisible();
-  await expect(component.getByText('CPU: 0.0% · Memory: unknown · Disk: 25.0%')).toHaveCount(3);
+  // The list is name, ID and health; address and resources are in the selected node's detail.
+  await expect(component.getByText('CPU: 0.0% · Memory: unknown · Disk: 25.0%')).toHaveCount(0);
+  await expect(component.getByText('http://192.168.1.20:3773')).toHaveCount(0);
   expect(requests).toBe(1); expect(healthChecks).toBe(0);
   await component.getByRole('button', { name: 'Worker one', exact: true }).click();
   const detail = component.getByRole('region', { name: 'Node detail' });
   await expect(detail.getByText(/Last manual check: healthy/)).toBeVisible();
+  await expect(detail.getByText('http://192.168.1.20:3773')).toBeVisible();
   await expect(detail.getByText(/#946 · implement · PID 123/)).toBeVisible();
   await expect(detail.getByText(/gah \/ #946 · renewed/)).toBeVisible();
   expect(healthChecks).toBe(1);
