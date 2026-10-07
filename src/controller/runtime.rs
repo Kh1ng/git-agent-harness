@@ -1179,27 +1179,16 @@ pub(crate) fn run_dispatch_and_record(
             } else {
                 None
             };
-            let details = format!("{label}: {e:#}");
-            if let Some(reason_code) = reason_code {
-                crate::events::record_with_run_id_and_reason_code(
-                    cfg,
-                    event_type,
-                    Some(args.profile.as_str()),
-                    work_id,
-                    args.run_id.as_deref(),
-                    details,
-                    Some(reason_code),
-                )?;
-            } else {
-                crate::events::record_with_run_id(
-                    cfg,
-                    event_type,
-                    Some(args.profile.as_str()),
-                    work_id,
-                    args.run_id.as_deref(),
-                    details,
-                )?;
-            }
+            crate::events::record_dispatch_error(
+                cfg,
+                event_type,
+                Some(args.profile.as_str()),
+                work_id,
+                args.run_id.as_deref(),
+                format!("{label}: {e:#}"),
+                reason_code,
+                &e,
+            )?;
             Err(e)
         }
     }

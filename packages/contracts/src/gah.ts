@@ -1291,6 +1291,18 @@ export interface ControllerEvent {
   reason_code?: string | null;
   details: string;
   remediation_plan?: RemediationPlan | null;
+  /** Routes the router passed over, when the dispatch ended because none could take it. */
+  skipped?: SkippedRoute[];
+}
+
+/** One backend and model the router considered and passed over (src/events.rs SkippedRoute). */
+export interface SkippedRoute {
+  backend: string;
+  backend_instance?: string | null;
+  model?: string | null;
+  /** The router's reason code: `max_concurrent_reached`, `authentication_error`… */
+  reason: string;
+  unavailable_until?: string | null;
 }
 
 // TICKET-505: HumanRequired reason codes
@@ -1330,6 +1342,8 @@ export interface ControllerActivity {
   action: string;
   status: ControllerActivityStatus;
   outcome: string | null;
+  /** Routes the router passed over, when the run ended because none could take it. */
+  skipped?: SkippedRoute[];
 }
 
 // ---------------------------------------------------------------------------
