@@ -99,7 +99,7 @@ export function AgentsPage({ sessions, deviceAgents, onNavigate, onWatchRun }: {
 
       {view === 'activity' && <>
       <LiveAgentsCard profile={profile || null} sessions={sessions} controllerRuns={controllerActivity}
-        claims={status.data?.active_claims ?? []} candidates={quota.data?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
+        workers={status.data?.running_workers ?? []} claims={status.data?.active_claims ?? []} candidates={quota.data?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
         onWatch={(row, watchable) => { if (row.runId) onWatchRun(asRun(row), watchable.map(asRun)); }} />
 
       <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error}

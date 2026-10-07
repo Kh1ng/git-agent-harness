@@ -96,6 +96,7 @@ interface GahStoreState {
  * long enough that switching between Overview/Telemetry/Quota in the same
  * minute doesn't re-hit the CLI three times. */
 const FRESH_MS = 15_000;
+let statusRequestId = 0;
 
 function isFresh(resource: Resource<unknown>, key: string): boolean {
   return resource.key === key && resource.fetchedAt !== null && Date.now() - resource.fetchedAt < FRESH_MS;
@@ -136,14 +137,20 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
     const current = get().status;
     if ((current.loading && current.key === key) || (!opts?.force && isFresh(current, key))) return;
     const pending = { ...(current.key === key ? current : emptyResource<StatusSnapshot>()), loading: true, error: null, key };
+    const requestId = ++statusRequestId;
     set({ status: pending });
     try {
       const data = await gahApi.getStatus(profile);
-      if (get().status !== pending) return;
-      set({ status: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
+      if (requestId !== statusRequestId) return;
+      const latest = get().status;
+      // A websocket roster received during this fetch is newer than its REST snapshot.
+      const snapshot = latest.data && latest.data.running_workers !== pending.data?.running_workers
+        ? { ...data, running_workers: latest.data.running_workers }
+        : data;
+      set({ status: { data: snapshot, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      if (get().status !== pending) return;
-      set({ status: { ...pending, loading: false, error: errorMessage(error) } });
+      if (requestId !== statusRequestId) return;
+      set({ status: { ...get().status, loading: false, error: errorMessage(error) } });
     }
   },
 

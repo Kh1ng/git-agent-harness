@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Radio } from 'lucide-react';
-import type { ActiveClaim, BackendInstanceSummary, ControllerActivity, DeviceAgent, LedgerEntry, QuotaCandidateStatus, Session } from '@git-agent-harness/contracts';
+import type { RunningWorker, ActiveClaim, BackendInstanceSummary, ControllerActivity, DeviceAgent, LedgerEntry, QuotaCandidateStatus, Session } from '@git-agent-harness/contracts';
 import { backendInstancesApi, gahApi } from '../api/client.js';
 import { formatLocalTime } from '../lib/format.js';
 
 /** What an agent account is doing right now, in the order the rows sort. */
-export type LiveState = 'working' | 'gates' | 'paused' | 'down' | 'halted' | 'idle';
+export type LiveState = 'working' | 'gates' | 'stale' | 'paused' | 'down' | 'halted' | 'idle';
 
 /** An agent account: a declared backend instance, or a routing candidate
  * from the quota snapshot when the profile declares no instances. */
@@ -45,10 +45,11 @@ export interface LiveAgentRow {
   reason: string | null;
 }
 
-const RANK: Record<LiveState, number> = { working: 0, gates: 0, paused: 1, down: 1, halted: 1, idle: 2 };
+const RANK: Record<LiveState, number> = { working: 0, gates: 0, stale: 0, paused: 1, down: 1, halted: 1, idle: 2 };
 const DOT: Record<LiveState, { className: string; pulse: boolean; label: string }> = {
   working: { className: 'bg-good', pulse: true, label: 'working' },
   gates: { className: 'bg-accent', pulse: true, label: 'running gates' },
+  stale: { className: 'bg-warning', pulse: false, label: 'stale' },
   paused: { className: 'bg-warning', pulse: false, label: 'paused' },
   idle: { className: 'bg-muted/40', pulse: false, label: 'idle' },
   halted: { className: 'bg-critical', pulse: false, label: 'halted' },
@@ -134,6 +135,8 @@ export function liveAccounts(instances: BackendInstanceSummary[], candidates: Qu
  * claim the loop holds. `backend` comes from the session, else from the
  * job's latest ledger entry once it has loaded. */
 interface LiveJob {
+  stale?: boolean;
+  instance?: string;
   key: string;
   workId: string | null;
   mode: string | null;
@@ -163,76 +166,79 @@ function sessionBackend(session: Session): string | null {
 }
 
 /**
- * One row per agent account, busy rows first, from what the dashboard
- * already holds: the live session list, running controller runs, the status
- * snapshot's active claims, and the quota snapshot's availability. A job
- * that no account explains gets a row of its own.
+ * Project the worker roster onto configured accounts, preserving one job per
+ * invocation. Older callers can still use the legacy observations; dashboard
+ * callers always provide workers, including an empty list on an older CLI.
  */
 export function buildLiveRows(input: {
+  workers?: RunningWorker[];
   accounts: LiveAccount[];
   sessions: Session[];
   controllerRuns: ControllerActivity[];
   claims: ActiveClaim[];
   /** Latest ledger entry per busy work id, when fetched. */
   ledgers: Record<string, LedgerEntry | null | undefined>;
-  /** Agent processes running in factory worktrees: the only source for a
-   * running dispatch's backend, which the ledger records when it ends. */
+  /** Compatibility input for callers without a runtime worker roster. */
   factoryAgents?: DeviceAgent[];
 }): LiveAgentRow[] {
   const jobs: LiveJob[] = [];
   const covered = new Set<string>();
-  for (const session of input.sessions) {
-    if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
-    if (session.target) covered.add(session.target);
-    jobs.push({ key: `session:${session.id}`, workId: session.target ?? null, mode: session.mode ?? null, since: session.startedAt ?? null,
-      // ponytail: jobs match accounts on backend only, since a session's instanceId is the
-      // dashboard's provider slot (`codex_instance_0`), not a backend instance. With two
-      // accounts on one backend the first takes the job; match on account once sessions carry it.
-      backend: sessionBackend(session), model: session.model ?? null, action: null, runId: null, routed: true });
+  if (input.workers === undefined) {
+    for (const session of input.sessions) {
+      if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
+      if (session.target) covered.add(session.target);
+      jobs.push({ key: `session:${session.id}`, workId: session.target ?? null, mode: session.mode ?? null, since: session.startedAt ?? null,
+        // ponytail: jobs match accounts on backend only, since a session's instanceId is the
+        // dashboard's provider slot (`codex_instance_0`), not a backend instance. With two
+        // accounts on one backend the first takes the job; match on account once sessions carry it.
+        backend: sessionBackend(session), model: session.model ?? null, action: null, runId: null, routed: true });
+    }
+    for (const run of input.controllerRuns) {
+      if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
+      if (run.work_id) covered.add(run.work_id);
+      const ledger = run.work_id ? input.ledgers[run.work_id] : null;
+      const [mode] = run.action.split(':');
+      jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
+        ...jobAgent(input.claims.find((claim) => claim.work_id === run.work_id)?.route, ledger), action: run.action, runId: run.run_id });
+    }
+    for (const claim of input.claims) {
+      if (covered.has(claim.work_id)) continue;
+      covered.add(claim.work_id);
+      const ledger = input.ledgers[claim.work_id];
+      jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? null, since: claim.claimed_at,
+        ...jobAgent(claim.route, ledger), action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
+    }
+    // Pair loop jobs with the factory's agent processes, oldest with oldest: the
+    // loop starts a job's agent right after it claims the work. With one process
+    // per job the process is the truth (a ledger entry is from an earlier
+    // attempt); otherwise only jobs that name no backend are filled in.
+    const processes = [...(input.factoryAgents ?? [])].sort((a, b) => (a.started_at ?? '').localeCompare(b.started_at ?? ''));
+    // A loop that records routes needs no pairing, and its processes would be paired with the wrong jobs.
+    const loopJobs = jobs.some((job) => job.routed && !job.key.startsWith('session:')) ? [] : jobs.filter((job) => !job.key.startsWith('session:')).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
+    const exact = loopJobs.length > 0 && processes.length === loopJobs.length;
+    (exact ? loopJobs : loopJobs.filter((job) => !job.backend)).forEach((job, index) => {
+      const agent = processes[index];
+      if (!agent) return;
+      job.backend = agent.tool;
+      job.model = agent.model ?? (exact ? null : job.model);
+    });
+  } else {
+    jobs.push(...input.workers.map(worker => ({ stale: worker.state === 'stale', instance: worker.backend_instance, key: `${worker.node_id}:${worker.run_id}:${worker.attempt}`, workId: worker.work_id, mode: worker.mode, since: worker.started_at, backend: worker.backend, model: worker.model, action: null, runId: worker.run_id })));
   }
-  for (const run of input.controllerRuns) {
-    if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
-    if (run.work_id) covered.add(run.work_id);
-    const ledger = run.work_id ? input.ledgers[run.work_id] : null;
-    const [mode] = run.action.split(':');
-    jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
-      ...jobAgent(input.claims.find((claim) => claim.work_id === run.work_id)?.route, ledger), action: run.action, runId: run.run_id });
-  }
-  for (const claim of input.claims) {
-    if (covered.has(claim.work_id)) continue;
-    covered.add(claim.work_id);
-    const ledger = input.ledgers[claim.work_id];
-    jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? null, since: claim.claimed_at,
-      ...jobAgent(claim.route, ledger), action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
-  }
-  // Pair loop jobs with the factory's agent processes, oldest with oldest: the
-  // loop starts a job's agent right after it claims the work. With one process
-  // per job the process is the truth (a ledger entry is from an earlier
-  // attempt); otherwise only jobs that name no backend are filled in.
-  const processes = [...(input.factoryAgents ?? [])].sort((a, b) => (a.started_at ?? '').localeCompare(b.started_at ?? ''));
-  // A loop that records routes needs no pairing, and its processes would be paired with the wrong jobs.
-  const loopJobs = jobs.some((job) => job.routed && !job.key.startsWith('session:')) ? [] : jobs.filter((job) => !job.key.startsWith('session:')).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
-  const exact = loopJobs.length > 0 && processes.length === loopJobs.length;
-  (exact ? loopJobs : loopJobs.filter((job) => !job.backend)).forEach((job, index) => {
-    const agent = processes[index];
-    if (!agent) return;
-    job.backend = agent.tool;
-    job.model = agent.model ?? (exact ? null : job.model);
-  });
   const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
-  const state = (job: LiveJob): LiveState => (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
+  const state = (job: LiveJob): LiveState => job.stale ? 'stale' : (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
 
   const used = new Set<string>();
   const rows: LiveAgentRow[] = [];
   for (const account of input.accounts) {
-    const job = jobs.find((candidate) => !used.has(candidate.key) && candidate.backend === account.backend) ?? null;
+    const job = jobs.find((candidate) => !used.has(candidate.key) && candidate.backend === account.backend && (candidate.instance === undefined || candidate.instance === account.id)) ?? null;
     if (job) used.add(job.key);
     rows.push({
       key: account.id,
       name: account.name,
       detail: account.backend,
       provider: account.provider,
-      model: job?.model ?? account.model,
+      model: job ? (input.workers === undefined ? job.model ?? account.model : job.model) : account.model,
       state: job ? state(job) : !account.enabled ? 'halted' : account.notReady ? 'down' : account.resumes ? 'paused' : 'idle',
       job: job?.workId ?? null,
       runId: job?.runId ?? null,
@@ -252,7 +258,7 @@ export function buildLiveRows(input: {
       name: account?.name ?? job.backend ?? UNASSIGNED,
       detail: account ? account.backend : job.action ?? job.backend,
       provider: account?.provider ?? null,
-      model: job.model ?? account?.model ?? null,
+      model: input.workers === undefined ? job.model ?? account?.model ?? null : job.model,
       state: state(job),
       job: job.workId,
       runId: job.runId,
@@ -276,6 +282,7 @@ function LiveRow({ row, now, ledger, onWatch }: { row: LiveAgentRow; now: number
   let line: ReactNode;
   if (row.state === 'working') line = <>{row.mode ? `${row.mode} on ` : 'working on '}{job}{elapsed}</>;
   else if (row.state === 'gates') line = <>{row.mode ?? 'gates'} on {job}{elapsed}</>;
+  else if (row.state === 'stale') line = <>stale · {row.mode} on {job}{elapsed}</>;
   else if (row.state === 'paused') line = <>paused on quota{row.reason ? ` (${row.reason})` : ''}, resumes in {formatDuration(Date.parse(row.resumes!) - now)} ({formatLocalTime(row.resumes) ?? row.resumes})</>;
   else if (row.state === 'halted') line = 'disabled, routing skips it';
   else if (row.state === 'down') line = <>not ready{row.reason ? `: ${row.reason}` : ''}</>;
@@ -315,11 +322,12 @@ function LiveRow({ row, now, ledger, onWatch }: { row: LiveAgentRow; now: number
 
 /**
  * Live: what each agent account is doing now. Elapsed timers tick every
- * second while any row is busy; each busy job's latest ledger entry names
- * its backend and the files it changed. The footer is the controller's
+ * second while any row is busy; the roster names its route and the latest
+ * ledger entry adds completed-attempt details. The footer is the controller's
  * latest run, so an idle fleet still says why.
  */
-export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates, factoryAgents, onWatch }: {
+export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates, factoryAgents, workers, onWatch }: {
+  workers?: RunningWorker[];
   /** Opens a read-only live view of a running job's output. */
   onWatch?: (row: LiveAgentRow, watchable: LiveAgentRow[]) => void;
   /** Agent processes in factory worktrees, from the device scan. */
@@ -356,12 +364,12 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     // `now` only sets the paused cut-off; the timer below re-renders the rows anyway.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [instances, candidates, aliases]);
-  const rows = useMemo(() => buildLiveRows({ accounts, sessions, controllerRuns, claims, ledgers, factoryAgents }), [accounts, sessions, controllerRuns, claims, ledgers, factoryAgents]);
-  const busyJobs = useMemo(() => [...new Set([
+  const rows = useMemo(() => buildLiveRows({ accounts, sessions, controllerRuns, claims, ledgers, factoryAgents, workers }), [accounts, sessions, controllerRuns, claims, ledgers, factoryAgents, workers]);
+  const busyJobs = useMemo(() => workers ? workers.map(worker => worker.work_id).filter((id): id is string => !!id) : [...new Set([
     ...sessions.filter((session) => ['starting', 'running', 'stopping'].includes(session.status)).map((session) => session.target),
     ...controllerRuns.filter((run) => run.status === 'running').map((run) => run.work_id),
     ...claims.map((claim) => claim.work_id)
-  ].filter((id): id is string => !!id))].slice(0, 8), [sessions, controllerRuns, claims]);
+  ].filter((id): id is string => !!id))].slice(0, 8), [workers, sessions, controllerRuns, claims]);
 
   useEffect(() => {
     if (busyJobs.length === 0) return;
@@ -395,7 +403,7 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     return () => { cancelled = true; for (const job of pending) fetchedIn.current.delete(job); };
   }, [busyJobs, ledgerEpoch, profile]);
 
-  const busy = rows.filter((row) => row.state === 'working' || row.state === 'gates').length;
+  const busy = workers?.length ?? rows.filter((row) => row.state === 'working' || row.state === 'gates').length;
   // Busy, paused and broken accounts need a look; idle subscriptions wait below in grey.
   const active = rows.filter((row) => row.state !== 'idle');
   const idle = rows.filter((row) => row.state === 'idle');

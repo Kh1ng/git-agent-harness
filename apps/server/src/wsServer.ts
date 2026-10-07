@@ -1,3 +1,4 @@
+import { runningWorkers } from './runningWorkers.js';
 /**
  * WebSocket server handler
  * Inspired by t3code's wsServer.ts
@@ -71,6 +72,7 @@ class WebSocketSessionStore {
     const messageStr = JSON.stringify(message);
     for (const [ws, info] of this.sessions) {
       if (ws !== exclude && ws.readyState === WebSocket.OPEN) {
+        if (message.type === 'workers.snapshot' && (!webSocketAccessValid(ws) || requiresFleetAuthentication(ws, 'session.status'))) continue;
         if (message.type === 'activity.event' && message.event.pairingRequestId && !webSocketCanApprovePairing(ws)) continue;
         // Profile-scoped chat pushes only reach clients subscribed to that
         // profile; everything else still fans out to all connected clients.
@@ -102,6 +104,7 @@ export function createWebSocketHandler(
     authHealthMonitor?: AuthHealthMonitor;
     runEvents?: typeof gahCli.runEvents;
     runQuota?: typeof gahCli.runQuota;
+    runStatus?: typeof gahCli.runStatus;
     gatewayHealth?: typeof gatewayHealth;
     onChatLifecycle?: (event: ChatLifecycleEvent) => void;
     /**
@@ -117,6 +120,7 @@ export function createWebSocketHandler(
   const activityFeed = deps.activityFeed ?? new ActivityFeed();
   const loadEvents = deps.runEvents ?? gahCli.runEvents;
   const loadQuota = deps.runQuota ?? gahCli.runQuota;
+  const loadStatus = deps.runStatus ?? gahCli.runStatus;
   const readGatewayHealth = deps.gatewayHealth ?? gatewayHealth;
   const syncing = new Map<string, Promise<void>>();
   const quotaSyncedAt = new Map<string, number>();
@@ -139,9 +143,15 @@ export function createWebSocketHandler(
       quotaDue ? loadQuota({ profile, since: '24h' }).catch((error) => {
         console.error(`Failed to refresh quota activity for ${profile}: ${error instanceof Error ? error.message : String(error)}`);
         return null;
-      }) : Promise.resolve(null)
+      }) : Promise.resolve(null),
+      sessionStore.profiles().includes(profile) ? loadStatus(profile, undefined, true).catch(() => null) : Promise.resolve(null)
     ])
-      .then(([events, quota]) => {
+      .then(([events, quota, status]) => {
+        if (status) {
+          const nodeId = (deps.coordinatorIdentity ?? getCoordinatorIdentity()).node_id;
+          const nodes = deps.node?.role === 'worker' ? [] : registryService.getObservationsWithoutWaiting();
+          sessionStore.broadcast({ type: 'workers.snapshot', profile, workers: runningWorkers(status, nodes, nodeId) }, undefined, profile);
+        }
         if (events) {
           const announce = primedEvents.has(profile);
           for (const controllerEvent of events) {

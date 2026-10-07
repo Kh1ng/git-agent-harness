@@ -95,3 +95,9 @@ apps/server/config/activity.jsonl
 config/push/
 apps/server/config/push/
 **/config/mutations/
+
+# Private enterprise staging and local Supabase CLI state.
+/enterprise-draft/
+/.supabase/
+/supabase/.temp/
+/supabase/.branches/

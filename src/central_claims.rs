@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-const DEFAULT_LEASE_SECONDS: u64 = 15 * 60;
+pub(crate) const DEFAULT_LEASE_SECONDS: u64 = 15 * 60;
 
 /// Resolves this node's identity for claims calls from the same
 /// `coordinator-identity.json` `apps/server` reads/writes

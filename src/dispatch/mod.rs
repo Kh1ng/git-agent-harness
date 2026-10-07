@@ -210,6 +210,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     ledger.dispatch_reason = args.dispatch_reason.clone();
     let started = Instant::now();
     fs::create_dir_all(&session_dir)?;
+    crate::running_workers::initialize_dispatch(&session_dir, args, &ts);
     println!("Session: {}", session_dir.display());
 
     let result = match JobKind::parse(&args.mode) {

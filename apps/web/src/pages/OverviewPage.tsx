@@ -1,3 +1,4 @@
+import { RunningWorkersRoster } from '../components/RunningWorkersRoster.js';
 import { useEffect, useState } from 'react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -24,7 +25,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
-import { LiveAgentsCard, liveRowTitle } from '../components/LiveAgentsCard.js';
+import { LiveAgentsCard } from '../components/LiveAgentsCard.js';
 import type { WatchableRun } from '../components/AgentLiveView.js';
 import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
 
@@ -85,9 +86,8 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
     }
   };
 
-  const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
-  const activeControllerRuns = controllerActivity.filter((run) => run.status === 'running');
-  const activeWorkCount = activeSessions.length + activeControllerRuns.length;
+  const workers = status.data?.running_workers ?? [];
+  const activeWorkCount = workers.length;
   const lastUpdated = oldestFetchedAt(status.fetchedAt, quota.fetchedAt);
 
   // The page's own title/refresh control renders unconditionally below --
@@ -183,7 +183,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
           icon={Coins}
           hint={usage?.requests_count !== null && usage?.requests_count !== undefined ? `${formatCount(usage.requests_count)} requests` : undefined}
         />
-        <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
+        <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint="Dispatch worker roster" />
         {/* The full candidate list lives on Usage > Quota; the tile only says whether routing is constrained. */}
         <button type="button" onClick={() => onNavigate('quota')} className="text-left" aria-label="Backend availability: open Quota">
           <StatTile label="Backends" icon={CheckCircle2}
@@ -193,11 +193,9 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
       </div>
 
       <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
-        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
-        onWatch={onWatchRun ? (row, watchable) => {
-          const asRun = (item: typeof row): WatchableRun => ({ runId: item.runId!, title: liveRowTitle(item), subtitle: item.mode });
-          if (row.runId) onWatchRun(asRun(row), watchable.map(asRun));
-        } : undefined} />
+        workers={workers} claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents} />
+
+      <RunningWorkersRoster workers={workers} onOpenWork={onOpenWork} onWatch={onWatchRun ? worker => onWatchRun({ runId: worker.run_id, title: `${worker.backend} ${worker.model ?? 'Unknown model'} on ${worker.work_id ?? 'Unknown work'}`, subtitle: worker.mode }, workers.map(row => ({ runId: row.run_id, title: `${row.backend} ${row.model ?? 'Unknown model'} on ${row.work_id ?? 'Unknown work'}`, subtitle: row.mode }))) : undefined} />
 
       <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { openChatSession(chatProfile, sessionId); onNavigate('chat'); }} />
 

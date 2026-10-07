@@ -42,6 +42,7 @@ pub(super) fn empty_snapshot() -> StatusSnapshot {
         errors: vec![],
         available_tickets: vec![],
         work_waypoint_evidence: Default::default(),
+        running_workers: Vec::new(),
         active_claims: vec![],
         pm_parent_states: vec![],
         pm_decomposition_attempt_counts: std::collections::HashMap::new(),

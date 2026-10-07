@@ -86,6 +86,11 @@ export function App() {
   }, [activeProfile, fetchQuota, reconnectSeq]);
   const subscriptions = useMemo(() => subscriptionUsage(quota.data), [quota.data]);
   const statusSnapshot = useGahStore((state) => state.status.data);
+  const fetchStatus = useGahStore(state => state.fetchStatus);
+  useEffect(() => {
+    void fetchStatus(activeProfile, { force: true });
+  }, [activeProfile, fetchStatus, reconnectSeq, activityRevision]);
+
   // The device's agent processes: what the factory is running right now, and what runs beside it.
   const [deviceAgents, setDeviceAgents] = useState<{ data: DeviceAgentsSnapshot | null; error: string | null }>({ data: null, error: null });
   // Each read scans the device's processes: fast while an agents view shows them, at the
@@ -103,7 +108,7 @@ export function App() {
   const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger, factoryAgents: deviceAgents.data?.factory_agents }),
     [subscriptions, sessions, controllerActivity, statusSnapshot, deviceAgents.data]);
 
-  // The navbar's "Working on #…": live from controller runs, with whatever status and quota are already loaded.
+  // The navbar uses the same worker roster as the page counters.
   const loopRunning = useGahStore((state) => state.loopStatus.data?.running ?? null);
   const working = useMemo(() => workingNow({ status: statusSnapshot, quota: quota.data, controllerRuns: controllerActivity, factoryAgents: deviceAgents.data?.factory_agents ?? [], loopRunning, now: Date.now() }),
     [statusSnapshot, quota.data, controllerActivity, deviceAgents.data, loopRunning]);
@@ -201,7 +206,7 @@ export function App() {
           <aside id="side-panel" aria-label={SIDE_VIEW_LABELS[sideView]}
             className={`side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:flex-none xl:border-r xl:border-subtle ${sideDetailOpen || sideView === 'agents' ? 'xl:w-[clamp(28rem,40vw,44rem)]' : 'xl:w-[clamp(20rem,25vw,30rem)]'}`}>
             <Suspense fallback={<LoadingState label="Loading…" />}>
-              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'agents' ? <RunningAgentsPanel profile={profileOverride ?? profile ?? null} sessions={sessions} controllerRuns={controllerActivity} factoryAgents={deviceAgents.data?.factory_agents} selectedRunId={sideRunId} onSelect={setSideRunId} /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} detailWorkId={sideWorkId} onSelectWork={setSideWorkId} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
+              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'agents' ? <RunningAgentsPanel selectedRunId={sideRunId} onSelect={setSideRunId} onOpenWork={openWorkInSidebar} /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} detailWorkId={sideWorkId} onSelectWork={setSideWorkId} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
             </Suspense>
           </aside>
         )}

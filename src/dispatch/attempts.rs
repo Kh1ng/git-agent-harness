@@ -561,6 +561,15 @@ pub(super) fn run_backend_with_reserved_route(
             }
         }
     };
+    let _worker_observation = crate::running_workers::InvocationGuard::start(
+        session_dir,
+        identity,
+        worktree::git(&["branch", "--show-current"], wt)
+            .ok()
+            .map(|s| s.trim().to_string()),
+        work_id,
+        crate::central_claims::DEFAULT_LEASE_SECONDS,
+    );
     let result = runner::for_kind(backend_kind).run(&runner::RunContext {
         executable: &executable,
         worktree: wt,
@@ -1317,20 +1326,6 @@ pub(super) fn mark_backend_unavailable_from_output_for_identity(
         log_text,
         log_path,
     )
-}
-
-#[cfg(test)]
-fn mark_backend_unavailable_from_output_at(
-    state_path: &Path,
-    backend: &str,
-    model: Option<&str>,
-    quota_pool: Option<&str>,
-    log_text: &str,
-    log_path: &str,
-) -> Result<Option<crate::quota_parser::ParsedFailure>> {
-    let identity =
-        crate::execution_identity::ExecutionIdentity::legacy_candidate(backend, model, quota_pool);
-    mark_backend_unavailable_from_output_for_identity_at(state_path, &identity, log_text, log_path)
 }
 
 fn mark_backend_unavailable_from_output_for_identity_at(

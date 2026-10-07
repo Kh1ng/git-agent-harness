@@ -17,6 +17,7 @@ import express, { type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES } from '@git-agent-harness/contracts';
 import type {
+  RunningWorker,
   ActivityNotificationPreferences,
   AdminUpdatePendingInfo,
   AdminUpdateState,
@@ -85,6 +86,10 @@ const REPORT_FIXTURE = readFixture<ReportData>('report.json');
 const PROFILE_FIXTURE = readFixture<ProfileSummary[]>('profile-list.json');
 
 export const MOCK_SCENARIOS = {
+  'running-workers': {
+    family: 'factory',
+    description: 'Concurrent routed factory workers, including a stale invocation.'
+  },
   normal: {
     family: 'streaming',
     description: 'Multi-chunk reply with a pending/completed tool call and terminal reply.'
@@ -1573,7 +1578,19 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     } satisfies ProjectImportResult);
   });
 
-  app.get('/api/status', (_req, res) => res.json(STATUS_FIXTURE));
+  app.get('/api/status', (_req, res) => {
+    if (state.scenario !== 'running-workers') return res.json(STATUS_FIXTURE);
+    const workers: RunningWorker[] = ['codex', 'claude'].map((backend, index) => ({
+      run_id: String(1431 + index), work_id: `#${1431 + index}`, mode: 'improve',
+      backend, runner: backend, backend_instance: `${backend}-account`,
+      requested_model: 'requested', model: `routed-${backend}`, actual_model: null,
+      node_id: 'fixture-node', branch: `gah/${1431 + index}`, attempt: 2,
+      started_at: new Date(Date.now() - 60_000).toISOString(),
+      last_activity_at: new Date(Date.now() - (index ? 901_000 : 30_000)).toISOString(),
+      stale_after_seconds: 900, state: index ? 'stale' : 'running'
+    }));
+    return res.json({ ...STATUS_FIXTURE, running_workers: workers });
+  });
   app.get('/api/quota', (_req, res) => res.json(QUOTA_FIXTURE));
   app.get('/api/registry/quota', (req, res) => res.json({
     profile: bodyString(req.query.profile) ?? QUOTA_FIXTURE.profile.profile,
