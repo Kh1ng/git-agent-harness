@@ -20,6 +20,7 @@ fn budget(
         max_manager_rounds: None,
         escalation_only,
         exhausted,
+        lifecycle_hold: false,
         hold_reason: exhausted.then(|| "issue budget spent".to_string()),
     }
 }
@@ -139,6 +140,45 @@ fn spent_budget_refuses_a_fresh_dispatch_of_the_same_issue() {
         matches!(action, NextAction::NoOp { .. }),
         "a spent budget must refuse dispatch, got {action:?}"
     );
+}
+
+#[test]
+fn a_lifecycle_hold_projected_onto_an_open_mr_stops_its_repair_round() {
+    let mut snapshot = empty_snapshot();
+    let mut needs_fix = mr("gah/issue/gah-42", "NEEDS_FIX");
+    needs_fix.work_id = Some("#42".into());
+    needs_fix.review_generation = Some("gen-1".into());
+    needs_fix.review_verdict = Some("NEEDS_FIX".into());
+    snapshot.merge_requests.push(needs_fix);
+    snapshot.blocked_work_items.push(Blocker {
+        kind: "human_required".into(),
+        reason: Some("retry_budget_exhausted".into()),
+        message: Some(
+            "MR on branch 'gah/issue/gah-42' classified NEEDS_FIX but issue budget spent: 3/3 manager rounds"
+                .into(),
+        ),
+        backend: None,
+        model: None,
+        quota_pool: None,
+        until: None,
+        source_reference: Some("#42".into()),
+        reason_code: Some("retry_budget_exhausted".into()),
+        remediation_plan: None,
+    });
+
+    match decide_next_action(&snapshot) {
+        NextAction::HumanRequired {
+            work_id,
+            reason,
+            reason_code,
+            ..
+        } => {
+            assert_eq!(work_id.as_deref(), Some("#42"));
+            assert!(reason.contains("3/3 manager rounds"), "{reason}");
+            assert_eq!(reason_code.as_deref(), Some("retry_budget_exhausted"));
+        }
+        other => panic!("expected the held MR to need a human, got {other:?}"),
+    }
 }
 
 #[test]

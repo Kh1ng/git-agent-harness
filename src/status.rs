@@ -481,7 +481,6 @@ fn build_snapshot_inner(
             entries,
             profile_name,
             profile,
-            ledger_entries_by_work_id.keys(),
             &mut work_waypoint_evidence,
         );
     }
@@ -798,15 +797,14 @@ fn build_snapshot_inner(
     // same way a ledger gate does: ticket-scoped, refused dispatch, visible
     // below, released by `gah clear-attempts`. A ledger gate already on the
     // ticket keeps its own reason.
-    let budget_hold = |work_id: Option<&str>| {
+    let budget_status = |work_id: Option<&str>| {
         work_waypoint_evidence
             .get(work_id?)?
             .issue_budget
             .as_ref()
-            .filter(|budget| budget.exhausted)?
-            .hold_reason
-            .clone()
+            .filter(|budget| budget.exhausted)
     };
+    let budget_hold = |work_id: Option<&str>| budget_status(work_id)?.hold_reason.clone();
     for ticket in &mut available_tickets {
         if !ticket.human_required && budget_hold(ticket.work_id.as_deref()).is_some() {
             ticket.human_required = true;
@@ -882,6 +880,61 @@ fn build_snapshot_inner(
             source_reference: Some(dependency.work_id.clone()),
             reason_code: Some(dependency.reason_code.clone()),
             remediation_plan: None,
+        });
+    }
+
+    // An issue whose elapsed-time or manager-round budget is spent stops
+    // being reviewed and repaired as well: project the hold onto its open
+    // MR so `decide_next_action` returns HumanRequired for it instead of
+    // starting another round. A ready, green MR is not held: merging it
+    // costs no further rounds. An MR already holding a gate keeps that one.
+    for mr in &merge_requests {
+        if !matches!(
+            mr.classification.as_str(),
+            "NEEDS_REVIEW" | "CI_FAILED" | "NEEDS_FIX"
+        ) {
+            continue;
+        }
+        let Some(reason) = budget_status(mr.work_id.as_deref())
+            .filter(|budget| budget.lifecycle_hold)
+            .and_then(|budget| budget.hold_reason.clone())
+        else {
+            continue;
+        };
+        let already_gated = blocked_work_items.iter().any(|blocker| {
+            blocker.kind == "human_required"
+                && blocker
+                    .source_reference
+                    .as_deref()
+                    .is_some_and(|reference| {
+                        mr.work_id.as_deref() == Some(reference) || mr.branch == reference
+                    })
+        });
+        if already_gated {
+            continue;
+        }
+        blocked_work_items.push(Blocker {
+            kind: "human_required".into(),
+            reason: Some(HumanRequiredReason::RetryBudgetExhausted.as_str().into()),
+            message: Some(format!(
+                "MR on branch '{}' classified {} but {reason}",
+                mr.branch, mr.classification
+            )),
+            backend: None,
+            model: None,
+            quota_pool: None,
+            until: None,
+            source_reference: mr.work_id.clone(),
+            reason_code: Some(HumanRequiredReason::RetryBudgetExhausted.as_str().into()),
+            remediation_plan: remediation_plan_for_blocker(
+                profile_name,
+                profile,
+                "human_required",
+                mr.work_id.as_deref(),
+                Some(HumanRequiredReason::RetryBudgetExhausted.as_str()),
+                None,
+                None,
+            ),
         });
     }
 

@@ -316,12 +316,18 @@ escalation_reserve_attempts = 1
 ```
 
 Usage is projected from the ledger on every status snapshot, under any
-alias of the work id (`#42` and `TICKET-42`). A spent budget holds the
-issue as a ticket-scoped `retry_budget_exhausted` work item: the loop
-refuses to dispatch, retry or escalate it while unrelated work keeps
-flowing. `gah status` lists each issue's remaining budget under "Issue
-budgets", and `gah clear-attempts` releases the hold by resetting the
-counters.
+alias of the work id (`#42` and `TICKET-42`). Dispatches that never
+launched a backend (capacity deferrals, lost claims) and reviews without a
+verdict do not count. A spent budget holds the issue as a ticket-scoped
+`retry_budget_exhausted` work item: the loop refuses to dispatch, retry or
+escalate it while unrelated work keeps flowing. When the elapsed-time or
+manager-round axis is spent, review and repair of the issue's open MR stop
+too (a green, approved MR still merges); a spent attempts axis only refuses
+new dispatches, so the MR the last attempt produced still gets its review.
+With `max_attempts = 2` and the default reserve of 1, one setup failure
+already holds the issue, because a same-tier retry may not use the reserve.
+`gah status` lists each issue's remaining budget under "Issue budgets", and
+`gah clear-attempts` releases the hold by resetting the counters.
 
 ### Restricting a job kind to named models
 

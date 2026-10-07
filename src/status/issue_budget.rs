@@ -5,7 +5,7 @@
 
 use super::WorkWaypointEvidence;
 use crate::config::{IssueBudget, Profile};
-use crate::dispatch::{issue_budget_usage, IssueBudgetUsage};
+use crate::dispatch::{issue_budget_usages, IssueBudgetUsage};
 use crate::ledger::LedgerEntry;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -27,17 +27,23 @@ pub struct IssueBudgetStatus {
     /// left and the last failure cannot be escalated): the issue is held
     /// and refused dispatch until an operator clears its attempts.
     pub exhausted: bool,
+    /// The hold comes from an axis that keeps growing while the issue's
+    /// MR is open (elapsed time, manager rounds), so review and repair of
+    /// that MR stop too. An attempts hold only refuses new dispatches:
+    /// the MR the last attempt produced still gets its review.
+    pub lifecycle_hold: bool,
     pub hold_reason: Option<String>,
 }
 
 pub fn evaluate(budget: &IssueBudget, usage: &IssueBudgetUsage) -> IssueBudgetStatus {
     let reserve = budget.escalation_reserve_attempts();
-    let elapsed_minutes = (usage.elapsed_seconds / 60.0).round() as u32;
+    let elapsed_minutes = (usage.elapsed_seconds / 60.0).floor() as u32;
     let attempts_left = budget
         .max_attempts
         .map(|max| max.saturating_sub(usage.attempts));
     let escalation_only = attempts_left.is_some_and(|left| left > 0 && left <= reserve);
     let mut hold_reason = None;
+    let mut lifecycle_hold = false;
     if let Some(max) = budget.max_attempts {
         if usage.attempts >= max {
             hold_reason = Some(format!(
@@ -48,6 +54,7 @@ pub fn evaluate(budget: &IssueBudget, usage: &IssueBudgetUsage) -> IssueBudgetSt
     }
     if let (None, Some(max)) = (&hold_reason, budget.max_elapsed_minutes) {
         if usage.elapsed_seconds >= f64::from(max) * 60.0 {
+            lifecycle_hold = true;
             hold_reason = Some(format!(
                 "issue budget spent: {elapsed_minutes}/{max} minutes elapsed"
             ));
@@ -55,6 +62,7 @@ pub fn evaluate(budget: &IssueBudget, usage: &IssueBudgetUsage) -> IssueBudgetSt
     }
     if let (None, Some(max)) = (&hold_reason, budget.max_manager_rounds) {
         if usage.manager_rounds >= max {
+            lifecycle_hold = true;
             hold_reason = Some(format!(
                 "issue budget spent: {}/{max} manager rounds",
                 usage.manager_rounds
@@ -83,36 +91,28 @@ pub fn evaluate(budget: &IssueBudget, usage: &IssueBudgetUsage) -> IssueBudgetSt
         max_manager_rounds: budget.max_manager_rounds,
         escalation_only,
         exhausted: hold_reason.is_some(),
+        lifecycle_hold,
         hold_reason,
     }
 }
 
-/// Attach a budget status to every work id (and alias) with recorded
-/// usage. `work_ids` is the ledger's work-id index key set.
-pub(super) fn project<'a>(
+/// Attach a budget status, under every alias, to each work id with
+/// recorded usage. One pass over the ledger.
+pub(super) fn project(
     budget: &IssueBudget,
     entries: &[LedgerEntry],
     profile_name: &str,
     profile: &Profile,
-    work_ids: impl Iterator<Item = &'a String>,
     evidence: &mut BTreeMap<String, WorkWaypointEvidence>,
 ) {
-    let mut projected: BTreeMap<String, IssueBudgetStatus> = BTreeMap::new();
-    for work_id in work_ids {
-        if projected.contains_key(work_id) {
-            continue;
-        }
-        let usage = issue_budget_usage(entries, profile_name, profile, work_id);
+    for (work_id, usage) in issue_budget_usages(entries, profile_name, profile) {
         if usage == IssueBudgetUsage::default() {
             continue;
         }
         let status = evaluate(budget, &usage);
-        for alias in crate::ledger::work_id_aliases(work_id) {
-            projected.insert(alias, status.clone());
+        for alias in crate::ledger::work_id_aliases(&work_id) {
+            evidence.entry(alias).or_default().issue_budget = Some(status.clone());
         }
-    }
-    for (work_id, status) in projected {
-        evidence.entry(work_id).or_default().issue_budget = Some(status);
     }
 }
 
@@ -278,6 +278,19 @@ mod tests {
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[1].starts_with("  - #300: attempts 2/2"), "{lines:?}");
         assert!(lines[1].contains("HELD: issue budget spent"), "{lines:?}");
+
+        let tombstone =
+            crate::ledger::LedgerEntry::new_clear_attempts("test", &cfg.profiles["test"], "#300");
+        crate::ledger::append(&cfg, &tombstone).unwrap();
+        let snapshot = crate::status::build_snapshot(&cfg, "test", now).unwrap();
+        let ticket = snapshot
+            .available_tickets
+            .iter()
+            .find(|ticket| ticket.work_id.as_deref() == Some("TICKET-300"))
+            .unwrap();
+        assert!(!ticket.human_required, "clear-attempts releases the hold");
+        assert!(snapshot.blocked_work_items.is_empty());
+        assert!(status_lines(&snapshot.work_waypoint_evidence).is_empty());
     }
 
     #[test]
@@ -325,6 +338,7 @@ mod tests {
             },
         );
         assert!(attempts.exhausted);
+        assert!(!attempts.lifecycle_hold);
         assert_eq!(
             attempts.hold_reason.as_deref(),
             Some("issue budget spent: 3/3 attempts")
@@ -336,10 +350,20 @@ mod tests {
                 ..IssueBudgetUsage::default()
             },
         );
+        assert!(elapsed.lifecycle_hold);
         assert_eq!(
             elapsed.hold_reason.as_deref(),
             Some("issue budget spent: 90/90 minutes elapsed")
         );
+        let almost = evaluate(
+            &budget(),
+            &IssueBudgetUsage {
+                elapsed_seconds: 89.0 * 60.0 + 59.0,
+                ..IssueBudgetUsage::default()
+            },
+        );
+        assert!(!almost.exhausted);
+        assert_eq!(almost.elapsed_minutes, 89);
         let rounds = evaluate(
             &budget(),
             &IssueBudgetUsage {
@@ -347,6 +371,7 @@ mod tests {
                 ..IssueBudgetUsage::default()
             },
         );
+        assert!(rounds.lifecycle_hold);
         assert_eq!(
             rounds.hold_reason.as_deref(),
             Some("issue budget spent: 2/2 manager rounds")
@@ -409,6 +434,7 @@ mod tests {
             max_manager_rounds: Some(2),
             escalation_only: false,
             exhausted: false,
+            lifecycle_hold: false,
             hold_reason: None,
         };
         let mut evidence = BTreeMap::new();
