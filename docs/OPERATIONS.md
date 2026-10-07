@@ -1565,6 +1565,8 @@ selected on its own, even if that ticket file has the same headings: there the
 sections stay hints. With `--mr` or `--existing-branch`, the scope check also
 counts changes already on the branch.
 
+A profile env file cannot set `GAH_ENFORCE_JOB_FILE`; only the `--enforce-job-file` flag turns enforcement on.
+
 ## Manager log
 
 Manager observations are appended to `manager-log.jsonl` beside the ledger;

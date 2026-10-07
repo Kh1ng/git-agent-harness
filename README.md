@@ -294,6 +294,41 @@ for normal review routing: use the ordered `review_candidates` pool and
 a weak reviewer `NEEDS_FIX` consumes the same post-review repair budget as
 any other `NEEDS_FIX` verdict.
 
+### Per-issue budget
+
+`routing.issue_budget` bounds the total automatic effort one issue may
+consume, on three independent axes. An axis left unset is unlimited, and a
+profile without the section keeps today's behaviour.
+
+```toml
+[profiles.my-repo.routing.issue_budget]
+# Worker attempts, counted across every dispatch of the issue, including
+# ones that failed in setup (preflight, backend launch, environment).
+max_attempts = 4
+# Summed recorded worker and review time.
+max_elapsed_minutes = 90
+# Review verdicts recorded for the issue.
+max_manager_rounds = 3
+# The last attempts of max_attempts are kept for an escalation to a
+# stronger backend/model; a same-tier retry is refused once only the
+# reserve is left. Defaults to 1.
+escalation_reserve_attempts = 1
+```
+
+Usage is projected from the ledger on every status snapshot, under any
+alias of the work id (`#42` and `TICKET-42`). Dispatches that never
+launched a backend (capacity deferrals, lost claims) and reviews without a
+verdict do not count. A spent budget holds the issue as a ticket-scoped
+`retry_budget_exhausted` work item: the loop refuses to dispatch, retry or
+escalate it while unrelated work keeps flowing. When the elapsed-time or
+manager-round axis is spent, review and repair of the issue's open MR stop
+too (a green, approved MR still merges); a spent attempts axis only refuses
+new dispatches, so the MR the last attempt produced still gets its review.
+With `max_attempts = 2` and the default reserve of 1, one setup failure
+already holds the issue, because a same-tier retry may not use the reserve.
+`gah status` lists each issue's remaining budget under "Issue budgets", and
+`gah clear-attempts` releases the hold by resetting the counters.
+
 ### Restricting a job kind to named models
 
 `allowed_models` is a strict, per-profile allow-list keyed by job kind
