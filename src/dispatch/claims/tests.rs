@@ -1472,5 +1472,8 @@ fn ticket_scan_capacity_deferral_resolves_claim_without_changing_attempt_history
     assert_eq!(after.0, 1);
     assert_eq!(after.1, 1);
 }
+
 #[path = "tests/repeated_setup.rs"]
 mod repeated_setup;
+#[path = "tests/repository_scope.rs"]
+mod repository_scope;
