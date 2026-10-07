@@ -543,6 +543,16 @@ labels conflict. Explicit dispatch of a trusted but held or unlabelled issue
 requires the visible `--issue-intake-override` flag; it never bypasses author
 trust.
 
+An issue a manager owns is **managed**: it carries the `managed` (or
+`gah:managed`) label, or, on a profile that keeps issue claims local, it is
+assigned to a login other than the one the loop acts as. Recurring discovery
+leaves it alone and `gah status` lists it under the intake rejections with the
+reason code `managed`; the dashboard's Assign button and `POST /api/dispatch`
+refuse to start a fix or improve job on it. Explicit
+`gah dispatch --target "#<n>"` still runs, since that is how the manager runs
+the issue it holds. With `issue_claim.mode = "github_assignee"` the assignee is
+a claim instead (next section), so only the label marks an issue managed.
+
 For backward compatibility, a GitHub profile without the new human list still
 uses `github_issue_author_allowlist`; if neither list is configured, only the
 repository owner is trusted. That compatibility field never grants GitLab
@@ -768,9 +778,11 @@ dev runs; `--prod` also switches policy enforcement to `git-push-prod`.
 ## Manager Agent
 
 `docs/gah-manager-skill.md` is the system prompt / skill file for a manager
-agent that orchestrates GAH: decomposes work via PM mode, dispatches workers,
-tracks state in the target repo's `docs/MANAGER_MEMORY.md`, and escalates
-failed tickets to stronger models.
+agent that owns issues end to end: it marks an issue `managed`, writes a job
+file (allowed files, expected result, verification checks, stop condition),
+runs one bounded worker, gates the result itself, opens the draft pull
+request, and gets an independent review before anything merges. Budgets are
+fixed per issue and a repeated failure is a hold, not a retry.
 
 ### Project skill bindings
 

@@ -1577,3 +1577,4 @@ add `--summary` for per-item totals and maxima. Both commands accept `--config-p
 Phases: `research`, `implement`, `repair`, `supervise`, `verify`, `merge`.
 Diagnoses: `setup_environment`, `credentials`, `failed_check`, `misunderstood_task`,
 `ambiguous_requirement`, `unknown`.
+`--work-id` and the summary treat `#12`, `TICKET-12` and a bare `12` as one item.

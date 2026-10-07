@@ -91,6 +91,7 @@ function JobCard({ card, now, selected, onSelect, onOpenWork, agents, assign }: 
             {card.working && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-good" aria-label="Running now" role="img" />}
             <span className="font-mono">{card.workId ?? 'No issue'}</span>
             {card.pullRequest?.id && <span>PR {card.pullRequest.id}{card.pullRequest.draft ? ' (draft)' : ''}</span>}
+            {card.managed && <StatusBadge tone="unknown" label="managed" />}
           </span>
           <span className="mt-1 line-clamp-2 block text-sm font-medium text-primary">{card.title}</span>
           <span className="mt-1 block text-xs text-secondary">{card.reason}</span>
@@ -218,6 +219,7 @@ export function KanbanView({ board, now, onOpenWork, assign }: { board: KanbanBo
             {board.notPickedUp.map((item) => (
               <li key={`${item.workId}-${item.title}`} className="text-xs text-secondary">
                 <span className="font-mono text-muted">{item.workId}</span> {item.title}
+                {item.managed && <span className="ml-1.5 inline-flex align-middle"><StatusBadge tone="unknown" label="managed" /></span>}
                 <span className="block text-[11px] text-muted">{item.reason}</span>
               </li>
             ))}
