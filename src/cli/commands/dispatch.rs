@@ -133,7 +133,7 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// The loop's atomic per-work claim (`work_claim::try_claim_work`), held by a
+/// The loop's atomic per-work claim, held by a
 /// manual worker for its whole run. The loop takes the same claim before it
 /// starts a job, so neither can start work the other holds, and
 /// `work_claim::record_route` applies to manual runs too.
@@ -151,7 +151,7 @@ impl ManualClaim {
         };
         let work_id = crate::work_claim::normalize_work_identity(&work_id);
         let scope = crate::work_claim::canonical_claim_scope(&args.profile, &profile.repo_id);
-        if !crate::work_claim::try_claim_work(&scope, &work_id)? {
+        if !crate::work_claim::try_claim_manual_work(&scope, &work_id)? {
             anyhow::bail!(
                 "Manual worker did not start: {work_id} is already being worked on by the loop or another worker"
             );
@@ -162,7 +162,7 @@ impl ManualClaim {
 
 impl Drop for ManualClaim {
     fn drop(&mut self) {
-        if let Err(error) = crate::work_claim::release_work(&self.scope, &self.work_id) {
+        if let Err(error) = crate::work_claim::release_owned_work(&self.scope, &self.work_id) {
             eprintln!(
                 "warning: could not release the claim on {}: {error:#}",
                 self.work_id
