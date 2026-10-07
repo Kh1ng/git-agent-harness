@@ -149,43 +149,54 @@ fn profile_chooses_sandbox(args: &[String]) -> bool {
 /// Issue #1464: does this run's Codex sandbox block `sccache`? When sccache
 /// is on PATH, `build_cache::ScopedCargoTarget::environment` sets
 /// `RUSTC_WRAPPER` to it. sccache keeps its cache outside the target
-/// directory and talks to a local server over a socket; a `read-only` or
-/// `workspace-write` sandbox opens neither, so every `cargo build` the
-/// worker ran would fail. Such a run drops the wrapper and compiles cold.
+/// directory and talks to a local server over TCP (127.0.0.1:4226); a
+/// `read-only` or `workspace-write` sandbox allows neither, so every
+/// `cargo build` the worker ran would fail. Such a run drops the wrapper and
+/// compiles cold.
 ///
 /// `gah_default` is whether GAH itself added `--sandbox workspace-write`.
-/// Profile codex_args then decide: a bypass flag or a `danger-full-access`
-/// mode (flag or `sandbox_mode` config) keeps the wrapper; any other explicit
-/// mode drops it; the last one given wins, as in the CLI. A named Codex
-/// profile (`-p`) may choose a sandbox GAH cannot see and keeps the wrapper.
-/// Other backends and runs GAH leaves unsandboxed are unaffected.
+/// Profile codex_args then decide: a bypass flag keeps the wrapper; otherwise
+/// the effective mode is the `-s`/`--sandbox` flag (the last one given) and,
+/// only without a flag, a `sandbox_mode` config override, as the CLI
+/// resolves them. `danger-full-access` keeps the wrapper; any other mode
+/// drops it. A named Codex profile (`-p`) may choose a sandbox GAH cannot
+/// see and keeps the wrapper. Other backends and runs GAH leaves unsandboxed
+/// are unaffected.
 fn sandbox_blocks_sccache(gah_default: bool, args: &[String]) -> bool {
-    let mut sandboxed = gah_default;
+    let mut flag_mode: Option<&str> = None;
+    let mut config_mode: Option<&str> = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        let config_value = arg
-            .strip_prefix("--config=")
-            .or_else(|| arg.strip_prefix("-c="))
-            .unwrap_or(arg)
-            .trim_start();
-        let mode = match arg.as_str() {
+        match arg.as_str() {
             "--yolo" | "--dangerously-bypass-approvals-and-sandbox" => return false,
-            "--full-auto" => Some("workspace-write"),
-            "-s" | "--sandbox" => args.next().map(String::as_str),
-            _ => arg
-                .strip_prefix("--sandbox=")
-                .or_else(|| arg.strip_prefix("-s="))
-                .or_else(|| {
-                    config_value
-                        .strip_prefix("sandbox_mode")
-                        .and_then(|rest| rest.trim_start().strip_prefix('='))
-                }),
-        };
-        if let Some(mode) = mode {
-            sandboxed = mode.trim().trim_matches('"') != "danger-full-access";
+            "-s" | "--sandbox" => {
+                if let Some(mode) = args.next() {
+                    flag_mode = Some(mode);
+                }
+            }
+            _ => {
+                if let Some(mode) = arg
+                    .strip_prefix("--sandbox=")
+                    .or_else(|| arg.strip_prefix("-s="))
+                {
+                    flag_mode = Some(mode);
+                } else if let Some(mode) = arg
+                    .strip_prefix("--config=")
+                    .or_else(|| arg.strip_prefix("-c="))
+                    .unwrap_or(arg)
+                    .trim_start()
+                    .strip_prefix("sandbox_mode")
+                    .and_then(|rest| rest.trim_start().strip_prefix('='))
+                {
+                    config_mode = Some(mode);
+                }
+            }
         }
     }
-    sandboxed
+    match flag_mode.or(config_mode) {
+        Some(mode) => mode.trim().trim_matches(|c| c == '"' || c == '\'') != "danger-full-access",
+        None => gah_default,
+    }
 }
 
 #[cfg(test)]
@@ -311,8 +322,8 @@ mod tests {
             vec!["--sandbox", "workspace-write"],
             vec!["--sandbox=read-only"],
             vec!["-s=workspace-write"],
-            vec!["--full-auto"],
             vec!["-c", "sandbox_mode=\"read-only\""],
+            vec!["-c", "sandbox_mode='read-only'"],
             vec!["--config=sandbox_mode=\"workspace-write\""],
             vec!["-c", "sandbox_mode = \"workspace-write\""],
         ] {
@@ -335,7 +346,7 @@ mod tests {
         ] {
             assert!(!sandbox_blocks_sccache(false, &args(&open)), "{open:?}");
         }
-        // The last explicit mode wins.
+        // Among sandbox flags the last wins.
         assert!(!sandbox_blocks_sccache(
             false,
             &args(&["-s", "read-only", "--sandbox=danger-full-access"])
@@ -343,6 +354,33 @@ mod tests {
         assert!(sandbox_blocks_sccache(
             false,
             &args(&["--sandbox=danger-full-access", "-s", "read-only"])
+        ));
+        // The flag beats a sandbox_mode config override in either order.
+        assert!(sandbox_blocks_sccache(
+            false,
+            &args(&[
+                "-s",
+                "read-only",
+                "-c",
+                "sandbox_mode=\"danger-full-access\""
+            ])
+        ));
+        assert!(sandbox_blocks_sccache(
+            false,
+            &args(&[
+                "-c",
+                "sandbox_mode=\"danger-full-access\"",
+                "-s",
+                "read-only"
+            ])
+        ));
+        assert!(!sandbox_blocks_sccache(
+            false,
+            &args(&[
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "--sandbox=danger-full-access"
+            ])
         ));
     }
     // ── run_codex ────────────────────────────────────────────────────────
