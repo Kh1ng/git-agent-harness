@@ -533,9 +533,13 @@ and moves on. Intake leaves alone every issue that another login holds,
 including one a person assigned by hand, which is held until that assignee is
 removed.
 
-A claim lasts `ttl_minutes` from its comment. The limit is hard: running work
-does not extend it. After it passes, another loop may remove the stale
-assignee and claim the issue, unless an open pull request for the issue exists.
+A claim is a lease of `ttl_minutes`. While the dispatch runs it renews the
+lease every third of that by editing its claim comment (an edit notifies
+nobody). A loop that crashes or stops stops renewing, and `ttl_minutes` after
+the last renewal another loop may remove the stale assignee and claim the
+issue, unless an open pull request for the issue exists. A dispatch that finds
+its lease taken over stops before it publishes: it keeps its work on a local
+WIP commit and the loop reports the issue as skipped.
 
 Every loop sharing the repository must use the same `ttl_minutes` and
 `priority_logins`, because each one decides a contested claim from its own

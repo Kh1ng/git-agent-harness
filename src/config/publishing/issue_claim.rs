@@ -21,9 +21,10 @@ pub enum IssueClaimMode {
 pub struct IssueClaimPolicy {
     #[serde(default)]
     pub mode: IssueClaimMode,
-    /// Minutes a claim holds an issue, counted from the claim comment. The
-    /// limit is hard: work in progress does not extend it. Only an open pull
-    /// request for the issue keeps it held afterwards.
+    /// Minutes a claim holds an issue without renewal. A running dispatch
+    /// renews its claim every third of this, so the claim lapses only when
+    /// its loop stops working. An open pull request for the issue keeps a
+    /// lapsed claim held.
     #[serde(default = "default_ttl_minutes")]
     pub ttl_minutes: u32,
     /// Seconds to wait between posting a claim and re-reading the issue to

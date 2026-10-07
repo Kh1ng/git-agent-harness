@@ -9,8 +9,10 @@
 //!
 //! The rules, all decided by [`standing`]:
 //!
-//! - A claim is live for `ttl_minutes` after its comment. The limit is hard;
-//!   nothing renews it.
+//! - A claim is live for `ttl_minutes` after its comment was posted or last
+//!   renewed. A dispatch that won a claim renews it while it runs (see
+//!   [`IssueLease`]), so only an abandoned claim expires. A dispatch whose
+//!   lease is lost stops before it publishes.
 //! - An assignee with no claim comment was assigned by hand. That holds the
 //!   issue until the assignee is removed.
 //! - When two loops hold live claims, the first login in `priority_logins`
@@ -34,6 +36,8 @@ use crate::ledger::LedgerEntry;
 use crate::provider::provider_command;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -72,34 +76,163 @@ pub(crate) fn issue_claim_lost(error: &anyhow::Error) -> Option<&IssueClaimLost>
 }
 
 /// Reserve the backend and node slot for one attempt and, on a dispatch's
-/// first attempt, claim its issue. A refused slot fails as a capacity
-/// deferral. Another login holding the issue fails with [`IssueClaimLost`];
-/// the slot is released as that error returns.
+/// first attempt, claim its issue and start renewing the claim in `lease`.
+/// Later attempts first confirm the lease is still held. A refused slot fails
+/// as a capacity deferral. Another login holding the issue fails with
+/// [`IssueClaimLost`]; the slot is released as that error returns.
 pub(super) fn admit_attempt(
     profile: &Profile,
     identity: &ExecutionIdentity,
     args: &DispatchArgs,
     attempt: u32,
     ledger: &mut LedgerEntry,
+    lease: &mut Option<IssueLease>,
 ) -> Result<BackendAdmissionGuard> {
+    if let Some(lease) = lease {
+        lease.ensure_held()?;
+    }
     let guard = reserve_backend_attempt(profile, identity, args.route_admission.as_ref())
         .map_err(|error| super::contextualize_capacity_deferral(error, attempt as usize))?;
     if attempt == 0 {
-        claim_or_lose(profile, &args.target, ledger)?;
+        *lease = claim_or_lose(profile, &args.target, ledger)?;
     }
     Ok(guard)
 }
 
-fn claim_or_lose(profile: &Profile, target: &str, ledger: &mut LedgerEntry) -> Result<()> {
-    if let ClaimOutcome::Lost(reason) = claim_issue(profile, target)? {
-        ledger.validation_result = Some(crate::ledger::gates::CLAIM_LOST.into());
-        return Err(IssueClaimLost {
-            issue: target.to_string(),
-            reason,
+fn claim_or_lose(
+    profile: &Profile,
+    target: &str,
+    ledger: &mut LedgerEntry,
+) -> Result<Option<IssueLease>> {
+    match claim_issue(profile, target)? {
+        ClaimOutcome::Lost(reason) => {
+            ledger.validation_result = Some(crate::ledger::gates::CLAIM_LOST.into());
+            Err(IssueClaimLost {
+                issue: target.to_string(),
+                reason,
+            }
+            .into())
         }
-        .into());
+        ClaimOutcome::Won if claims_on_provider(profile, target) => {
+            Ok(Some(IssueLease::start(profile, target)))
+        }
+        ClaimOutcome::Won => Ok(None),
     }
-    Ok(())
+}
+
+fn claims_on_provider(profile: &Profile, target: &str) -> bool {
+    profile.publishing.issue_claim.mode != IssueClaimMode::Local && is_issue_number(target)
+}
+
+/// A won claim, renewed in the background while the dispatch runs. Renewal
+/// is the dispatch's proof of life: a loop that crashes stops renewing, and
+/// its claim lapses `ttl_minutes` later. Dropping the lease stops renewal and
+/// leaves the claim in place to lapse on its own, unless a pull request for
+/// the issue is opened first.
+#[derive(Debug)]
+pub(super) struct IssueLease {
+    issue: String,
+    lost: Arc<Mutex<Option<String>>>,
+    stop: Option<mpsc::Sender<()>>,
+    renewer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IssueLease {
+    fn start(profile: &Profile, issue: &str) -> Self {
+        let lost = Arc::new(Mutex::new(None));
+        let (stop, stopped) = mpsc::channel::<()>();
+        let profile = profile.clone();
+        let target = issue.to_string();
+        let thread_lost = Arc::clone(&lost);
+        let renewer = std::thread::spawn(move || {
+            let policy = profile.publishing.issue_claim.clone();
+            let board = GithubBoard { profile: &profile };
+            while let Err(RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(renewal_interval(&policy))
+            {
+                let renewed = own_login()
+                    .and_then(|me| renew(&board, &policy, &me, &target, OffsetDateTime::now_utc()));
+                match renewed {
+                    Ok(None) => {}
+                    Ok(Some(reason)) => {
+                        *thread_lost.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+                        return;
+                    }
+                    // A missed renewal is retried next interval; the claim
+                    // lapses only if renewals keep failing for a whole TTL.
+                    Err(error) => {
+                        eprintln!(
+                            "warning: could not renew the claim on issue #{target}: {error:#}"
+                        )
+                    }
+                }
+            }
+        });
+        Self {
+            issue: issue.to_string(),
+            lost,
+            stop: Some(stop),
+            renewer: Some(renewer),
+        }
+    }
+
+    /// Fails with [`IssueClaimLost`] once another loop has taken the issue
+    /// or this loop's claim lapsed or was removed. The dispatch must stop:
+    /// its work is no longer the work of record for the issue.
+    pub(super) fn ensure_held(&self) -> Result<()> {
+        match self.lost.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(reason) => Err(IssueClaimLost {
+                issue: self.issue.clone(),
+                reason,
+            }
+            .into()),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for IssueLease {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(renewer) = self.renewer.take() {
+            let _ = renewer.join();
+        }
+    }
+}
+
+/// Renew three times per TTL, so two missed renewals in a row still leave
+/// the claim live.
+fn renewal_interval(policy: &IssueClaimPolicy) -> std::time::Duration {
+    std::time::Duration::from_secs((u64::from(policy.ttl_minutes) * 60 / 3).max(1))
+}
+
+/// Extend this loop's live claim on `issue`. Returns why the claim is lost
+/// when this loop no longer holds the issue, and renews nothing then.
+fn renew(
+    board: &impl IssueBoard,
+    policy: &IssueClaimPolicy,
+    me: &str,
+    issue: &str,
+    now: OffsetDateTime,
+) -> Result<Option<String>> {
+    let view = board.view(issue)?;
+    match standing(&view, me, policy, now) {
+        Standing::Mine => {}
+        Standing::Theirs(login) => return Ok(Some(format!("lease taken over by {login}"))),
+        Standing::Unclaimed | Standing::Stale(_) => {
+            return Ok(Some(
+                "this loop's claim lapsed or was removed while it worked".to_string(),
+            ))
+        }
+    }
+    let own = view
+        .claims
+        .iter()
+        .filter(|claim| same_login(&claim.login, me))
+        .max_by_key(|claim| claim.id)
+        .context("a held claim has a claim comment")?;
+    board.renew_claim(own.id, &claim_comment(me, policy, own.created_at, now))?;
+    Ok(None)
 }
 
 /// Claim `target` on the provider, waiting out the verify window. Returns
@@ -165,6 +298,9 @@ struct ClaimComment {
     id: u64,
     login: String,
     created_at: OffsetDateTime,
+    /// When the claim was last renewed: GitHub's `updated_at`, which moves
+    /// only when the comment is edited. Equals `created_at` until then.
+    renewed_at: OffsetDateTime,
 }
 
 /// The provider facts a claim decision reads.
@@ -205,7 +341,7 @@ fn standing(
             .max_by_key(|claim| claim.id);
         let mine = same_login(login, me);
         match latest_claim {
-            Some(claim) if now - claim.created_at < ttl => live.push((login, claim.id)),
+            Some(claim) if now - claim.renewed_at < ttl => live.push((login, claim.id)),
             Some(_) if !mine => stale.push(login.clone()),
             None if !mine => return Standing::Theirs(login.clone()),
             // This loop's own expired claim or hand assignment holds nothing
@@ -233,6 +369,7 @@ trait IssueBoard {
     fn assign(&self, issue: &str, login: &str) -> Result<()>;
     fn unassign(&self, issue: &str, logins: &[String]) -> Result<()>;
     fn post_claim(&self, issue: &str, body: &str) -> Result<()>;
+    fn renew_claim(&self, comment_id: u64, body: &str) -> Result<()>;
     fn has_open_pull_request(&self, issue: &str) -> Result<bool>;
 }
 
@@ -263,7 +400,7 @@ fn stake(
         Standing::Unclaimed => {}
     }
     board.assign(issue, me)?;
-    if let Err(error) = board.post_claim(issue, &claim_comment(me, policy, now)) {
+    if let Err(error) = board.post_claim(issue, &claim_comment(me, policy, now, now)) {
         // An assignee without a claim comment reads as a hand assignment and
         // would hold the issue against every loop indefinitely.
         if let Err(cleanup) = board.unassign(issue, &[me.to_string()]) {
@@ -294,10 +431,17 @@ fn settle(
     Ok(ClaimOutcome::Lost(reason))
 }
 
-fn claim_comment(me: &str, policy: &IssueClaimPolicy, now: OffsetDateTime) -> String {
-    let now = now.replace_nanosecond(0).unwrap_or(now);
+fn claim_comment(
+    me: &str,
+    policy: &IssueClaimPolicy,
+    claimed_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> String {
     let expires = now + time::Duration::minutes(policy.ttl_minutes.into());
-    let stamp = |at: OffsetDateTime| at.format(&Rfc3339).unwrap_or_else(|_| at.to_string());
+    let stamp = |at: OffsetDateTime| {
+        let at = at.replace_nanosecond(0).unwrap_or(at);
+        at.format(&Rfc3339).unwrap_or_else(|_| at.to_string())
+    };
     let node = hostname::get()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -305,9 +449,10 @@ fn claim_comment(me: &str, policy: &IssueClaimPolicy, now: OffsetDateTime) -> St
     // `post_issue_comment` needs: it never repeats an identical comment.
     format!(
         "{CLAIM_MARKER}login={me} node={node} claimed_at={claimed} expires_at={expires} -->\n\
-         Claimed by the GAH loop of {me} on `{node}` until {expires}. After that another loop \
-         may take this issue over, unless an open pull request references it.",
-        claimed = stamp(now),
+         Claimed by the GAH loop of {me} on `{node}` until {expires}; the loop renews this \
+         claim while it works. If it lapses, another loop may take this issue over, unless an \
+         open pull request references it.",
+        claimed = stamp(claimed_at),
         expires = stamp(expires),
     )
 }
@@ -384,7 +529,7 @@ impl<'a> GithubBoard<'a> {
         let endpoint = self.issue_endpoint(issue, "/comments?per_page=100")?;
         let filter = format!(
             ".[] | select(.body | startswith(\"{CLAIM_MARKER}\")) \
-             | {{id, login: (.user.login // \"\"), created_at}}"
+             | {{id, login: (.user.login // \"\"), created_at, updated_at}}"
         );
         let lines = gh(
             "read claim comments",
@@ -404,14 +549,21 @@ impl<'a> GithubBoard<'a> {
             .map(|line| {
                 let value: serde_json::Value =
                     serde_json::from_str(line).context("parsing a claim comment")?;
-                let created_at = value["created_at"]
-                    .as_str()
-                    .and_then(|at| OffsetDateTime::parse(at, &Rfc3339).ok());
-                match (value["id"].as_u64(), value["login"].as_str(), created_at) {
+                let time = |field: &str| {
+                    value[field]
+                        .as_str()
+                        .and_then(|at| OffsetDateTime::parse(at, &Rfc3339).ok())
+                };
+                match (
+                    value["id"].as_u64(),
+                    value["login"].as_str(),
+                    time("created_at"),
+                ) {
                     (Some(id), Some(login), Some(created_at)) => Ok(ClaimComment {
                         id,
                         login: login.to_string(),
                         created_at,
+                        renewed_at: time("updated_at").map_or(created_at, |at| at.max(created_at)),
                     }),
                     _ => anyhow::bail!("claim comment is missing its id, author, or time"),
                 }
@@ -471,6 +623,20 @@ impl IssueBoard for GithubBoard<'_> {
 
     fn post_claim(&self, issue: &str, body: &str) -> Result<()> {
         crate::provider::post_issue_comment(self.profile, issue, body)
+    }
+
+    /// Editing the claim comment moves its `updated_at`, which is the
+    /// renewal. An edit notifies nobody, unlike a fresh comment.
+    fn renew_claim(&self, comment_id: u64, body: &str) -> Result<()> {
+        let endpoint = format!("repos/{}/issues/comments/{comment_id}", self.profile.repo);
+        let body = format!("body={body}");
+        gh(
+            "renew claim comment",
+            &[
+                "api", "--method", "PATCH", &endpoint, "-f", &body, "--silent",
+            ],
+        )
+        .map(drop)
     }
 
     fn has_open_pull_request(&self, issue: &str) -> Result<bool> {

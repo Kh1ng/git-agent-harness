@@ -24,6 +24,7 @@ fn claim(id: u64, login: &str, minutes: i64) -> ClaimComment {
         id,
         login: login.to_string(),
         created_at: at(minutes),
+        renewed_at: at(minutes),
     }
 }
 
@@ -83,7 +84,20 @@ impl IssueBoard for LoopBoard {
             id,
             login: self.login.to_string(),
             created_at: self.now,
+            renewed_at: self.now,
         });
+        Ok(())
+    }
+
+    fn renew_claim(&self, comment_id: u64, _body: &str) -> Result<()> {
+        let mut issue = self.issue.borrow_mut();
+        let comment = issue
+            .view
+            .claims
+            .iter_mut()
+            .find(|claim| claim.id == comment_id)
+            .context("no such comment")?;
+        comment.renewed_at = self.now;
         Ok(())
     }
 
@@ -175,7 +189,7 @@ fn a_claim_holds_until_its_ttl_and_not_a_minute_longer() {
         standing(&held, MICHAEL, &policy, at(60)),
         Standing::Stale(vec![COLTON.into()])
     );
-    // The holder's own view expires too: there is no renewal.
+    // An unrenewed claim lapses in the holder's own view too.
     assert_eq!(
         standing(&held, COLTON, &policy, at(60)),
         Standing::Unclaimed
@@ -324,6 +338,70 @@ fn a_live_claim_of_this_loop_is_reused_without_a_new_comment() {
         Some(ClaimOutcome::Won)
     );
     assert_eq!(issue.borrow().view.claims.len(), 1);
+}
+
+#[test]
+fn a_renewed_claim_outlives_its_ttl_and_lapses_a_ttl_after_its_last_renewal() {
+    let issue = Rc::new(RefCell::new(Issue {
+        view: view(&[COLTON], vec![claim(1, COLTON, 0)]),
+        ..Default::default()
+    }));
+    let policy = policy(&[]);
+    let (_, colton) = two_loops(&issue, 40);
+
+    assert_eq!(renew(&colton, &policy, COLTON, "7", at(40)).unwrap(), None);
+
+    let seen = issue.borrow().view.clone();
+    assert_eq!(
+        standing(&seen, MICHAEL, &policy, at(99)),
+        Standing::Theirs(COLTON.into())
+    );
+    assert_eq!(
+        standing(&seen, MICHAEL, &policy, at(100)),
+        Standing::Stale(vec![COLTON.into()])
+    );
+    // Renewal keeps the claim's place in a contest: its comment id is unchanged.
+    assert_eq!(seen.claims[0].id, 1);
+}
+
+#[test]
+fn a_lease_taken_over_after_it_lapsed_is_reported_lost_and_not_renewed() {
+    let issue = Rc::new(RefCell::new(Issue::default()));
+    let policy = policy(&[]);
+    let (michael, colton) = two_loops(&issue, 0);
+    assert_eq!(stake(&colton, &policy, COLTON, "7", at(0)).unwrap(), None);
+
+    // Colton's renewals stopped; Michael takes the lapsed claim over.
+    let (michael_later, colton_later) = two_loops(&issue, 61);
+    drop((michael, colton));
+    assert_eq!(
+        stake(&michael_later, &policy, MICHAEL, "7", at(61)).unwrap(),
+        None
+    );
+
+    let lost = renew(&colton_later, &policy, COLTON, "7", at(62)).unwrap();
+
+    assert_eq!(lost, Some(format!("lease taken over by {MICHAEL}")));
+    assert_eq!(assignees(&issue), [MICHAEL]);
+    let colton_claim = issue.borrow().view.claims[0].clone();
+    assert_eq!(colton_claim.renewed_at, at(0));
+}
+
+#[test]
+fn a_lost_lease_stops_the_dispatch_with_a_claim_lost_error() {
+    let lease = IssueLease {
+        issue: "7".into(),
+        lost: Arc::new(Mutex::new(Some(format!("lease taken over by {MICHAEL}")))),
+        stop: None,
+        renewer: None,
+    };
+
+    let error = lease.ensure_held().unwrap_err();
+
+    assert!(issue_claim_lost(&error).is_some());
+    assert!(!crate::dispatch::terminal::should_notify_dispatch_failure(
+        &error
+    ));
 }
 
 #[test]
