@@ -53,6 +53,41 @@ Validation is layered so a bad value can never lock you out of the config:
 - The loop logs a warning at startup when the settings can never be admitted
   on this node, instead of leaving the fact buried in deferral logs.
 
+### Release channel and in-app updates (issue #1416)
+
+A green merge to `main` publishes a prerelease **edge** channel build
+(`.github/workflows/release-edge.yml`): the `gah` and `gah-mcp-server`
+binaries (Linux x86_64, macOS universal), the server bundle
+(`gah-server-bundle.tar.gz`: the prebuilt `apps/server` and `apps/web` dist
+outputs plus
+the OpenCode agent configs), and `edge-manifest.json` — the versioned
+manifest with a SHA-256 per artifact. When the `TAURI_SIGNING_PRIVATE_KEY`
+secret is configured, the same release carries a signed Tauri updater feed
+(`latest.json`) for the desktop app.
+
+Install from the channel instead of rebuilding from source — the checkout
+stays the deployment root, only the artifact source changes (no git pull,
+cargo, or npm build):
+
+```bash
+gah update --from-release            # edge channel, manifest auto-discovered from origin
+gah update --from-release --release-manifest /path/or/https://.../edge-manifest.json
+```
+
+Every surface shows "Update available" against the same feed: the web
+dashboard's top banner and Settings page (which offer *Update and restart*),
+the desktop app's Settings row (signed updater, restarts into the new
+bundle), and the Fleet page — where each worker reports its version, nodes
+behind the coordinator are flagged, *Update node* / *Update all nodes*
+push the release to workers, and per-node auto-update opts a node in to
+updating whenever central sees it behind. A worker that is mid-dispatch
+finishes its run before the update restarts anything. Workers older than
+the coordinator's minimum supported version
+(`packages/contracts/src/coordinator-protocol.json`) are flagged
+`unsupported` instead of failing silently. Source rebuilds remain the
+explicit developer mode (`gah update` without `--from-release`, or the
+Settings page's *Rebuild from source*).
+
 ### Deterministic CLI/control-plane update
 
 Do not assume a `cargo build --release` updates the `gah` command on PATH. A
@@ -826,6 +861,20 @@ Each backend authenticates through its own CLI, not through GAH:
   default `HOME` and therefore one authenticated account/quota pool;
   `agy-second` is isolated by `agy_second_home` as a distinct account.
 - **vibe**, **opencode**, **openhands** — their own respective CLI auth.
+
+### Runner permissions
+
+By default, `gah` injects necessary flags so implementation dispatches (`improve`, `experiment`), which run in a GAH worktree, can make progress. Read-only dispatches (`research`, `audit`, `estimate`, `pm`) run in the profile's real checkout and, like review dispatches, receive none of these flags: they keep the backend CLI's own default permissions plus whatever the profile's `codex_args`/`claude_args` set.
+
+- **codex** — Implementation dispatches run with `--sandbox workspace-write --add-dir <CARGO_TARGET_DIR>`: the worktree plus that dispatch's own build target directory, and nothing above it. A profile `codex_args` that chooses its own sandbox (`--sandbox`/`-s`, `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`) replaces the default sandbox mode.
+- **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and an `--allowedTools` list of the edit tools (`Edit,Write,MultiEdit,NotebookEdit`) plus a fixed set of shell commands: `git`, `cargo`, `npm`, `npx`, `node`, `pnpm`, `yarn`, `make`, `python`, `python3`, `pytest`, `go`, and the read-only `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, plus `mkdir`. Each is passed as `Bash(<command>:*)`. Unrestricted `Bash` is not the default, because Claude Code has no sandbox: it would let an unattended job run any command as the node user, network included. The list is a reduction, not a sandbox — a build script or a test can still run arbitrary code. A project that needs another command (its own validation command, for example) sets `claude_args = ["--allowedTools", "Edit,Write,MultiEdit,NotebookEdit,Bash(git:*),Bash(<command>:*)"]`, or plain `Bash` to accept unrestricted shell. A profile `claude_args` that sets `--permission-mode` (or `--dangerously-skip-permissions`) or `--allowedTools` replaces the matching default.
+- **Other runners** — Depend on their own CLI defaults.
+
+If the backend CLI still refuses an implementation run's writes and the attempt
+changes nothing, GAH appends a `GAH: backend writes refused (configuration error): …`
+line to `backend-output.log` naming the setting to fix, records the attempt as
+`environment_error`, and ends the dispatch without spending the remaining
+retries.
 
 Validate that a profile's declared backends and tokens are actually present
 before trusting an unattended run:

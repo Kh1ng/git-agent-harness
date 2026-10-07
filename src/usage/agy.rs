@@ -124,7 +124,6 @@ fn parse(output: &[u8], account: &str, now: OffsetDateTime) -> Result<Vec<QuotaO
                     format!("Antigravity usage reported no readable {window} balance for {pool}")
                 }),
                 usage_source: Some(USAGE_SOURCE.into()),
-                mistral_admin: None,
                 account_usage: None,
             });
         }
@@ -243,6 +242,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn refresh_invokes_slash_command_and_keeps_selected_home() {
+        let _exec = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let (script, args) = fake_agy(dir.path(), "  --disable-slash-commands  Disable them");
         let selected_home = dir.path().join("selected-home");
@@ -261,6 +261,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn refresh_never_sends_usage_to_a_build_without_print_mode_slash_commands() {
+        let _exec = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let (script, args) = fake_agy(dir.path(), "  --print  Run a single prompt");
         let error = refresh(script.to_str().unwrap(), "agy", None).unwrap_err();

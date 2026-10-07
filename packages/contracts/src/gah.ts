@@ -505,6 +505,16 @@ export interface QuotaCandidateStatus {
   quota_observations?: QuotaObservation[];
 }
 
+export type QuotaCheckStatus =
+  | 'data'
+  | 'no_data'
+  | 'failed'
+  /** #1336: the source's latest check says it needs a login or key. */
+  | 'auth_required'
+  /** #1336: a configured candidate expects this allowance source, but the
+   * node holds no credential for it, so no check can ever run there. */
+  | 'not_configured';
+
 export interface QuotaCheck {
   credential_id?: string | null;
   backend: string;
@@ -512,13 +522,21 @@ export interface QuotaCheck {
   backend_instance?: string | null;
   model?: string | null;
   quota_pool?: string | null;
-  checked_at: string;
-  status: 'data' | 'no_data' | 'failed';
+  /** When the check last ran. Absent only for a `not_configured` source,
+   * which has never been checked on that node (#1336). */
+  checked_at?: string | null;
+  status: QuotaCheckStatus;
   quota_observations?: QuotaObservation[];
   error?: string | null;
+  /** #1336: start of the current run of consecutive auth_required
+   * failures; repeat refresh markers keep this one timestamp so the whole
+   * run stays a single "how long has it been failing". */
+  failing_since?: string | null;
 }
 
 export interface QuotaSnapshot {
+  /** v3 adds auth_required/not_configured checks and optional checked_at;
+   * central also accepts legacy v2 worker snapshots. */
   schema_version: number;
   generated_at: string;
   freshness: {
@@ -600,18 +618,6 @@ export interface QuotaObservation {
   check_error?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
-  mistral_admin?: {
-    workspace_usage?: LedgerUsage | null;
-    billing?: LedgerUsage | null;
-    rate_limits?: {
-      requests_per_second: number | null;
-      model_limits: {
-        model: string;
-        tokens_per_minute: number | null;
-        tokens_per_month: number | null;
-      }[];
-    } | null;
-  } | null;
 }
 
 export interface BackendModelComparison {
@@ -1162,6 +1168,8 @@ export interface ConfigProfileSummary {
   improve_candidates: RoutingCandidateSummary[];
   review_candidates: RoutingCandidateSummary[];
   task_routing_rules: TaskRoutingRuleSummary[];
+  /** Strict allow-lists by job kind (for example `review`); a kind without an entry is open. */
+  allowed_models?: Record<string, RoutingCandidateSummary[]>;
   routine_reviewer: RoutingCandidateSummary | null;
   escalatory_reviewers: RoutingCandidateSummary[];
   context: ConfigProfileContextSummary;
@@ -1882,6 +1890,30 @@ export interface AdminUpdateState {
   exitCode: number | null;
   pid: number | null;
   output: string;
+  /** Issue #1416: which install path this run used -- `release` (download
+   * published artifacts, no rebuild) or `source` (git pull + rebuild).
+   * Absent on states written by pre-#1416 servers. */
+  mode?: 'release' | 'source' | null;
+}
+
+// ---------------------------------------------------------------------------
+// Release channel (issue #1416): a green merge to main publishes a
+// prerelease "edge" build; central compares its own version against the
+// channel's latest so the dashboard can show "Update available · vX → vY"
+// without rebuilding from source.
+// ---------------------------------------------------------------------------
+
+export type ReleaseChannel = 'edge' | 'stable';
+
+export interface ReleaseChannelStatus {
+  channel: ReleaseChannel;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  published_at: string | null;
+  /** The release's own notes/changelog body, bounded by the server. */
+  notes: string;
 }
 
 /** Exact work-item scope of a paid-route request or existing operator grant. */

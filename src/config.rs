@@ -452,8 +452,12 @@ pub fn check_profile_candidate_model_consistency(
 ) -> Result<(), Vec<String>> {
     let routing = profile.effective_routing(defaults);
     let candidates = routing.labeled_candidates();
-    let mut errors = Vec::new();
+    let mut errors = routing.allowed_model_errors();
     for (label, candidate) in candidates {
+        // An allow-list entry without a model admits any model on its backend.
+        if label == "allowed_model" && candidate.model.is_none() {
+            continue;
+        }
         let args = match candidate.backend.as_str() {
             "codex" => &profile.codex_args,
             "opencode" => &profile.opencode_args,

@@ -200,7 +200,6 @@ fn refresh_and_store_with(
                     checked_at: None,
                     check_error: None,
                     usage_source: Some("mistral_dashboard".into()),
-                    mistral_admin: None,
                     account_usage: None,
                     credential_id: None,
                 });

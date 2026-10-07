@@ -1386,7 +1386,7 @@ fn install_linux_prefers_the_tailnet_bind_host() {
         Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "PATH={}:{}\n{host}\nrole={role}\n{block}\nprintf '%s' \"$server_host\"",
+                "PATH=\"{}:{}\"\n{host}\nrole={role}\n{block}\nprintf '%s' \"$server_host\"",
                 path.display(),
                 std::env::var("PATH").unwrap_or_default()
             ))
@@ -1457,7 +1457,7 @@ fn standalone_install_never_touches_tailscale() {
         Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "PATH={}:{}\nrole={role}\n{block}\n",
+                "PATH=\"{}:{}\"\nrole={role}\n{block}\n",
                 tmp.display(),
                 std::env::var("PATH").unwrap_or_default()
             ))

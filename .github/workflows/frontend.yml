@@ -75,6 +75,9 @@ jobs:
       - name: Check bundled desktop Settings
         run: node scripts/test-desktop-settings.mjs
 
+      - name: Run unit tests
+        run: npm run test:unit --workspace=apps/web
+
       - name: Run e2e tests
         id: e2e
         run: npm run e2e --workspace=apps/web

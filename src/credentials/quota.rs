@@ -36,7 +36,6 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
         } else {
             format!("credential_api:{}", info.provider)
         }),
-        mistral_admin: None,
         account_usage: None,
     }
 }
@@ -208,7 +207,6 @@ fn observation(
             failed.quota_reset_at = None;
             failed.observed_at = None;
             failed.account_usage = None;
-            failed.mistral_admin = None;
             failed.checked_at = now.format(&Rfc3339).ok();
             failed.check_error = Some(crate::redact::redact(&error.to_string()));
             failed
