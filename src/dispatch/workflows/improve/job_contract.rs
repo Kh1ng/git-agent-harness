@@ -85,6 +85,20 @@ pub(super) fn for_dispatch(
     )
 }
 
+/// Runs the opt-in decision on its own, before the dry run, the validation
+/// gate self-check and the claim, so a bad job file fails first.
+/// Only `improve` and `fix` run this workflow; other modes are untouched.
+pub(in crate::dispatch) fn preflight(args: &crate::dispatch::DispatchArgs) -> Result<()> {
+    use crate::job_kind::JobKind;
+    if !matches!(
+        JobKind::parse(&args.mode),
+        Ok(JobKind::Improve | JobKind::Fix)
+    ) {
+        return Ok(());
+    }
+    for_dispatch(args, false).map(drop)
+}
+
 fn decide(
     args: &crate::dispatch::DispatchArgs,
     has_issue: bool,
@@ -262,11 +276,24 @@ pub(super) fn validate(
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<(), (String, Option<i32>)> {
+    check(contract, profile, wt, env, timeout, true)
+}
+
+fn check(
+    contract: Option<&JobContract>,
+    profile: &Profile,
+    wt: &Path,
+    env: &[(String, String)],
+    timeout: Duration,
+    run_commands: bool,
+) -> Result<(), (String, Option<i32>)> {
     if let Some(contract) = contract {
         contract
             .scope(profile, wt)
             .map_err(|error| (error.to_string(), None))?;
-        validate_with_exit_code(&contract.commands, wt, env, timeout)?;
+        if run_commands {
+            validate_with_exit_code(&contract.commands, wt, env, timeout)?;
+        }
     }
     Ok(())
 }
@@ -279,7 +306,12 @@ pub(super) fn publish_guard(
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<()> {
-    if let Err((error, _)) = validate(contract, profile, wt, env, timeout) {
+    // "passed" is set only when the last validation round, which includes
+    // the job commands, passed on this worktree; nothing writes to it between
+    // that round and here, so only the scope is re-checked. A failing-draft
+    // publish (`--allow-draft-fail`) still runs the commands and is refused.
+    let run_commands = ledger.validation_result.as_deref() != Some("passed");
+    if let Err((error, _)) = check(contract, profile, wt, env, timeout, run_commands) {
         ledger.set_failure(
             FailureClass::ValidationFailure,
             FailureStage::PostValidation,

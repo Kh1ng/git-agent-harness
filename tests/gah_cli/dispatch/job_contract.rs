@@ -77,6 +77,19 @@ fn run_job_options(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    if enforce && (body.contains("paragraph") || !local_md || !body.contains("## ")) {
+        // A bad job file fails before the validation gate, the claim and the
+        // ledger entry, and before the agent runs.
+        assert!(!marker.exists());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("Verification commands") || error.contains("--enforce-job-file"));
+        let text = fs::read_to_string(&ledger).unwrap_or_default();
+        assert!(
+            !text.contains("\"mode\":\"fix\""),
+            "no ledger entry expected: {text}"
+        );
+        return (Value::Null, String::new(), String::new());
+    }
     let text = fs::read_to_string(&ledger).unwrap();
     let entry: Value = text
         .lines()
@@ -102,11 +115,6 @@ fn run_job_options(
         assert!(!succeeds, "successful dispatch must record its branch");
     }
     let prompt_text = fs::read_to_string(prompt).unwrap_or_default();
-    if enforce && (body.contains("paragraph") || !local_md || !body.contains("## ")) {
-        assert!(!marker.exists());
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("Verification commands") || error.contains("--enforce-job-file"));
-    }
     (entry, prompt_text, gh)
 }
 
@@ -277,4 +285,50 @@ fn job_contract_flag_requires_local_markdown_before_agent() {
         true,
         false,
     );
+}
+
+#[test]
+fn job_contract_commands_run_once_on_success() {
+    let tmp = test_tempdir();
+    let runs = tmp.path().join("runs.txt");
+    run_job(
+        &format!(
+            "## Verification commands\n- `echo run >> '{}'`",
+            runs.display()
+        ),
+        "echo change >> README.md",
+        false,
+        true,
+        PASS,
+    );
+    assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn job_contract_dry_run_validates_the_flag() {
+    let tmp = test_tempdir();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, PASS);
+    let job = tmp.path().join("job.md");
+    fs::write(&job, "# No contract").unwrap();
+    let output = bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            job.to_str().unwrap(),
+            "--dry-run",
+            "--enforce-job-file",
+        ])
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", tmp.path().join("ledger.jsonl"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--enforce-job-file"));
 }

@@ -8,6 +8,7 @@ mod review;
 
 pub(super) use experiment::experiment as run_experiment;
 pub(super) use improve::improve as run_improve;
+pub(super) use improve::preflight_job_contract;
 pub(crate) use pm::plans as pm_plans;
 pub(crate) use pm::{
     pm as run_pm, publish_plan as run_pm_publish,

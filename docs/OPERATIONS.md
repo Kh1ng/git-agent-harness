@@ -1709,8 +1709,11 @@ Allowed files are repository-relative paths or globs: `*` matches within a
 segment, and a trailing `/` or `/**` allows all files beneath a directory.
 Absolute paths and `..` are rejected. After profile validation, dispatch checks
 changed paths, then runs the job commands; failures enter the repair retry loop.
-Scope and job commands are checked again before publishing, including with
-`--allow-draft-fail`. Missing sections disable their respective rules.
+Scope is checked again before publishing. The job commands run again only when
+the last validation round did not pass, so a `--allow-draft-fail` draft is still
+refused while a passing run executes them once. The job file is checked before
+the dry run, the validation gate self-check and the claim, so a bad job file
+fails before anything else happens. Missing sections disable their respective rules.
 
 These contracts apply only when an operator hands the file to `gah dispatch`
 directly. They never apply to a provider issue, and never to a ticket the loop
