@@ -180,7 +180,10 @@ pub(super) fn build_task(
 }
 
 pub(in crate::dispatch) fn append_job_file(task: &mut String, text: &str) {
-    task.push_str("\n## Job file\n\nAllowed files and Verification commands sections are enforced before publishing.\n\n");
+    task.push_str(
+        "\n## Job file\n\nAllowed files and Verification commands sections are enforced before publishing. \
+         If the text below is truncated, the whole file is still enforced.\n\n",
+    );
     append_bounded_text(task, text, 16 * 1024, "Job file");
 }
 

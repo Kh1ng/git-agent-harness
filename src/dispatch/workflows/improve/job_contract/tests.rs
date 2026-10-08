@@ -205,3 +205,73 @@ fn changed_paths_include_committed_and_pending_rename_sides() {
         ]
     );
 }
+
+#[test]
+fn fences_close_only_on_a_bare_marker_at_least_as_long() {
+    let commands = |text: &str| section(text, "Verification commands", "job.md");
+    // An inner shorter fence or one with an info string does not close the
+    // outer fence, so the bullets inside stay out of the command list.
+    let text = "## Verification commands\n````\n```sh\n- rm -rf /\n```\n````\n- cargo test";
+    assert_eq!(commands(text).unwrap().unwrap(), vec!["cargo test"]);
+    let text = "## Verification commands\n```\n```rust\n- rm -rf /\n```\n- cargo test";
+    assert_eq!(commands(text).unwrap().unwrap(), vec!["cargo test"]);
+    let text = "## Verification commands\n~~~\n```\n- rm -rf /\n~~~\n- cargo test";
+    assert_eq!(commands(text).unwrap().unwrap(), vec!["cargo test"]);
+    // An unclosed fence would hide every later heading; it is an error.
+    let error = commands("```\n## Verification commands\n- cargo test")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("never closed"), "{error}");
+}
+
+#[test]
+fn only_a_real_heading_ends_a_section_and_sub_headings_are_errors() {
+    let commands = |text: &str| section(text, "Verification commands", "job.md");
+    // `#123` and `#tag` are prose, not headings.
+    let text = "## Verification commands\n- cargo fmt\n#123 is the issue\n- cargo test";
+    assert_eq!(
+        commands(text).unwrap().unwrap(),
+        vec!["cargo fmt", "cargo test"]
+    );
+    // A heading of the same or a higher level ends the section.
+    for next in ["## Notes", "# Notes"] {
+        let text = format!("## Verification commands\n- cargo test\n{next}\n- not a command");
+        assert_eq!(commands(&text).unwrap().unwrap(), vec!["cargo test"]);
+    }
+    // A deeper heading inside the section would silently drop or adopt the
+    // bullets under it; it is an error.
+    let error = commands("## Verification commands\n- cargo test\n### Extra\n- cargo clippy")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("sub-heading"), "{error}");
+    // A deeper heading in another section is fine.
+    let text = "## Notes\n### Detail\n## Verification commands\n- cargo test";
+    assert_eq!(commands(text).unwrap().unwrap(), vec!["cargo test"]);
+    // A second section of the same name is an error, not silently ignored.
+    let error = commands("## Verification commands\n- a\n## Verification commands\n- b")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("more than once"), "{error}");
+}
+
+#[test]
+fn checkboxes_and_bare_notes_are_rejected_before_the_agent_runs() {
+    for bullet in ["- [ ] cargo test", "- [x] cargo test", "- (run this last)"] {
+        let text = format!("## Verification commands\n{bullet}");
+        assert!(
+            section(&text, "Verification commands", "job.md").is_err(),
+            "{bullet}"
+        );
+    }
+    // A quoted item may still carry a note in parentheses.
+    assert_eq!(
+        section(
+            "## Verification commands\n- `(cd web && npm test)`",
+            "Verification commands",
+            "job.md"
+        )
+        .unwrap()
+        .unwrap(),
+        vec!["(cd web && npm test)"]
+    );
+}

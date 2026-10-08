@@ -169,16 +169,13 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     println!("Backend: {}", args.backend);
     println!();
 
+    workflows::preflight_job_contract(args)?;
     if args.dry_run {
         return dry_run::dry_run(cfg, profile, args);
     }
 
-    // TICKET-073: verify the dispatch gate itself (validation_commands) against
-    // a fresh worktree before spending any backend budget. Skips entirely when
-    // the commands are unchanged since the last successful self-check (fast
-    // path, hash compare only); otherwise spins up one fresh worktree and runs
-    // the commands once. A failed self-check bails with a distinct error and is
-    // NOT conflated with the dispatched ticket's own outcome.
+    // TICKET-073: self-check the validation gate in a fresh worktree (skipped
+    // when unchanged) before any backend spend; its failure is distinct.
     self_check_validation_gate(profile, cfg, args.skip_validation_gate)?;
 
     // Issue #882: local claim-mode ledger entry, or a central claims API

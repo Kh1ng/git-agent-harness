@@ -85,6 +85,20 @@ pub(super) fn for_dispatch(
     )
 }
 
+/// Runs the opt-in decision on its own, before the dry run, the validation
+/// gate self-check and the claim, so a bad job file fails first.
+/// Only `improve` and `fix` run this workflow; other modes are untouched.
+pub(in crate::dispatch) fn preflight(args: &crate::dispatch::DispatchArgs) -> Result<()> {
+    use crate::job_kind::JobKind;
+    if !matches!(
+        JobKind::parse(&args.mode),
+        Ok(JobKind::Improve | JobKind::Fix)
+    ) {
+        return Ok(());
+    }
+    for_dispatch(args, false).map(drop)
+}
+
 fn decide(
     args: &crate::dispatch::DispatchArgs,
     has_issue: bool,
@@ -112,38 +126,69 @@ pub(super) fn append_prompt(contract: Option<&JobContract>, task: &mut String) {
     }
 }
 
+/// A fence opener: three or more backticks or tildes. Returns the marker
+/// character and run length.
+fn fence_open(line: &str) -> Option<(char, usize)> {
+    let c = line.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = line.chars().take_while(|ch| *ch == c).count();
+    (len >= 3).then_some((c, len))
+}
+
+/// A fence closes only on a run of the opener's character at least as long
+/// as the opener, with nothing after it (no info string).
+fn closes_fence(line: &str, (c, len): (char, usize)) -> bool {
+    line.chars().count() >= len && line.chars().all(|ch| ch == c)
+}
+
+/// An ATX heading level: one to six `#` followed by whitespace or the end of
+/// the line. `#123` or `#hashtag` is prose, not a heading.
+fn heading_level(line: &str) -> Option<usize> {
+    let level = line.chars().take_while(|ch| *ch == '#').count();
+    let rest = &line[level..];
+    ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with(char::is_whitespace)))
+        .then_some(level)
+}
+
 fn section(text: &str, heading: &str, file: &str) -> Result<Option<Vec<String>>> {
-    let mut found = false;
+    let mut found: Option<usize> = None;
+    let mut seen = false;
     let mut items = Vec::new();
     let mut fence = None;
     for raw in text.lines() {
         let line = raw.trim();
-        let marker = ["```", "~~~"]
-            .into_iter()
-            .find(|marker| line.starts_with(marker));
         if let Some(open) = fence {
-            if marker == Some(open) {
+            if closes_fence(line, open) {
                 fence = None;
             }
             continue;
         }
-        if let Some(marker) = marker {
-            fence = Some(marker);
+        if let Some(open) = fence_open(line) {
+            fence = Some(open);
             continue;
         }
-        if line.starts_with('#') {
-            if found {
-                break;
+        if let Some(level) = heading_level(line) {
+            if let Some(section_level) = found {
+                if level > section_level {
+                    bail!("Job file {file}: {heading} contains a sub-heading; end the list before `{line}` or move it out of the section");
+                }
+                found = None;
             }
             let name = line.trim_matches('#').trim();
-            found = name
+            if name
                 .strip_suffix(':')
                 .unwrap_or(name)
                 .trim()
-                .eq_ignore_ascii_case(heading);
+                .eq_ignore_ascii_case(heading)
+            {
+                if seen {
+                    bail!("Job file {file}: {heading} appears more than once");
+                }
+                seen = true;
+                found = Some(level);
+            }
             continue;
         }
-        if !found {
+        if found.is_none() {
             continue;
         }
         let bullet = ["-", "*", "+"].iter().find_map(|prefix| {
@@ -157,6 +202,12 @@ fn section(text: &str, heading: &str, file: &str) -> Result<Option<Vec<String>>>
             bail!("Job file {file}: {heading} contains an indented bullet");
         }
         let bullet = bullet.trim();
+        if ["[ ]", "[x]", "[X]"]
+            .iter()
+            .any(|box_| bullet.starts_with(box_))
+        {
+            bail!("Job file {file}: {heading} contains a task-list checkbox; list plain items: {bullet}");
+        }
         let quoted = bullet
             .split_once('`')
             .and_then(|(_, rest)| rest.split_once('`').map(|(item, _)| item));
@@ -171,9 +222,18 @@ fn section(text: &str, heading: &str, file: &str) -> Result<Option<Vec<String>>>
         if item.is_empty() {
             bail!("Job file {file}: {heading} contains an empty bullet item");
         }
+        if quoted.is_none() && item.starts_with('(') {
+            bail!("Job file {file}: {heading} contains a note where an item is expected: {bullet}");
+        }
         items.push(item.into());
     }
-    if !found {
+    if let Some((c, len)) = fence {
+        bail!(
+            "Job file {file}: a code fence ({}) is never closed",
+            c.to_string().repeat(len)
+        );
+    }
+    if !seen {
         return Ok(None);
     }
     if items.is_empty() {
@@ -216,11 +276,24 @@ pub(super) fn validate(
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<(), (String, Option<i32>)> {
+    check(contract, profile, wt, env, timeout, true)
+}
+
+fn check(
+    contract: Option<&JobContract>,
+    profile: &Profile,
+    wt: &Path,
+    env: &[(String, String)],
+    timeout: Duration,
+    run_commands: bool,
+) -> Result<(), (String, Option<i32>)> {
     if let Some(contract) = contract {
         contract
             .scope(profile, wt)
             .map_err(|error| (error.to_string(), None))?;
-        validate_with_exit_code(&contract.commands, wt, env, timeout)?;
+        if run_commands {
+            validate_with_exit_code(&contract.commands, wt, env, timeout)?;
+        }
     }
     Ok(())
 }
@@ -233,7 +306,12 @@ pub(super) fn publish_guard(
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<()> {
-    if let Err((error, _)) = validate(contract, profile, wt, env, timeout) {
+    // "passed" is set only when the last validation round, which includes
+    // the job commands, passed on this worktree; nothing writes to it between
+    // that round and here, so only the scope is re-checked. A failing-draft
+    // publish (`--allow-draft-fail`) still runs the commands and is refused.
+    let run_commands = ledger.validation_result.as_deref() != Some("passed");
+    if let Err((error, _)) = check(contract, profile, wt, env, timeout, run_commands) {
         ledger.set_failure(
             FailureClass::ValidationFailure,
             FailureStage::PostValidation,

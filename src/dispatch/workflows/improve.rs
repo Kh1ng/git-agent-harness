@@ -42,6 +42,7 @@ mod conflict_resolution;
 mod finish;
 mod handoff;
 mod job_contract;
+pub(in crate::dispatch) use job_contract::preflight as preflight_job_contract;
 mod publish_mr;
 use finish::finish_improve_workflow;
 mod repair;
