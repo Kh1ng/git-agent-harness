@@ -979,6 +979,7 @@ fn github_dependency_chain_excludes_653_while_652_is_open() {
         &prof,
         &[],
         &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+        &[],
     );
     assert!(scan
         .available_tickets
@@ -1041,7 +1042,7 @@ fn github_dependency_query_fixture_releases_653_when_652_closes() {
         r#"{"number":652,"body":"","state":"OPEN"}"#,
     )
     .unwrap();
-    let blocked = scan_available_tickets_with_dependencies(&prof, &[], &ledger);
+    let blocked = scan_available_tickets_with_dependencies(&prof, &[], &ledger, &[]);
     assert!(blocked.available_tickets.is_empty());
     assert_eq!(
         blocked.dependency_blockers[0].reason_code,
@@ -1059,7 +1060,7 @@ fn github_dependency_query_fixture_releases_653_when_652_closes() {
         r#"{"number":652,"body":"","state":"CLOSED"}"#,
     )
     .unwrap();
-    let released = scan_available_tickets_with_dependencies(&prof, &[], &ledger);
+    let released = scan_available_tickets_with_dependencies(&prof, &[], &ledger, &[]);
     assert!(released.dependency_blockers.is_empty());
     assert_eq!(
         released.available_tickets[0].work_id.as_deref(),
@@ -1109,6 +1110,7 @@ fn gitlab_provider_fixture_reproduces_sportsball_dependency_chains() {
         &prof,
         &[],
         &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+        &[],
     );
     assert!(scan.available_tickets.is_empty());
     assert_eq!(scan.dependency_blockers.len(), 5);
@@ -1148,6 +1150,7 @@ fn provider_list_failure_is_visible_and_fails_native_intake_closed() {
         &prof,
         &[],
         &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+        &[],
     );
     assert!(scan.available_tickets.is_empty());
     assert!(scan
