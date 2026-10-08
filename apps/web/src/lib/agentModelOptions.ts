@@ -2,12 +2,18 @@ import type { ManagerModelInfo } from '@git-agent-harness/contracts';
 import type { AgentModelOption } from '../components/AgentModelSelect.js';
 import { agentModelLabel } from './agentModelLabel.js';
 
+// The levels `Profile::set_agent_effort` (src/config/backend_paths/
+// agent_effort.rs) accepts besides `default`; Claude takes all but `ultra`.
+export const NATIVE_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
 export function taskReasoningEfforts(backend: string, advertised: { id: string; name: string }[] = []): { id: string; name: string }[] {
   // Claude's ACP chat catalog can omit effort even though task dispatch uses
   // the native --effort flag. CLI levels: code.claude.com/docs/en/model-config.
-  return backend === 'claude' && advertised.length === 0
-    ? ['low', 'medium', 'high', 'xhigh', 'max'].map((id) => ({ id, name: id }))
-    : advertised;
+  const accepted: readonly string[] = backend === 'claude' ? NATIVE_REASONING_EFFORTS.filter((id) => id !== 'ultra') : NATIVE_REASONING_EFFORTS;
+  const efforts = backend === 'claude' && advertised.length === 0 ? accepted.map((id) => ({ id, name: id })) : advertised;
+  // A catalog may advertise levels the CLI flag cannot carry; offering them
+  // would only fail when the job starts.
+  return efforts.filter((effort) => effort.id === 'default' || accepted.includes(effort.id));
 }
 
 export function agentModelOptions(backend: string, models: ManagerModelInfo[], aliases: { backend: string; alias: string; model: string }[]): AgentModelOption[] {
@@ -35,7 +41,7 @@ export function agentModelOptions(backend: string, models: ManagerModelInfo[], a
     }
     options.push({ value: /^agy(?:[:_-]|$)/i.test(backend) ? model.name : model.id, label: agentModelLabel(backend, model, resolved), details });
   }
-  const effortOrder = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const effortOrder: readonly string[] = NATIVE_REASONING_EFFORTS;
   for (const option of options) option.variants?.sort((a, b) => effortOrder.indexOf(a.effort) - effortOrder.indexOf(b.effort));
   return options;
 }

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Loader2, Play } from 'lucide-react';
 import type { AvailableTicket, ProfileSummary, Session } from '@git-agent-harness/contracts';
+import { generateRequestId } from '@git-agent-harness/shared';
 import { gahApi } from '../api/client.js';
 import { useBackendModels } from './AgentLimitsSection.js';
 import { AgentModelSelect } from './AgentModelSelect.js';
@@ -46,7 +47,7 @@ export function StartWorkerSection({ profile, agents, tickets, sessions, onActiv
     setLaunched(null);
     try {
       const result = await gahApi.startWorker({ profile: profile.name, providerKind: profile.provider, repo: profile.repo,
-        backend, model, target: job.ticket_path, ...(native ? { reasoningEffort: effort } : {}), requestId: crypto.randomUUID() });
+        backend, model, target: job.ticket_path, ...(native ? { reasoningEffort: effort } : {}), requestId: generateRequestId() });
       setLaunched(result.session);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setPending(false); }
