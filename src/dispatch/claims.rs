@@ -93,8 +93,11 @@ fn is_control_record(mode: &str) -> bool {
 
 /// Fold one work item's ledger history in append order. Control records leave
 /// the lease alone; dispatch outcomes and attempt resets resolve it.
-fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> bool {
-    active_claim(entries).is_some()
+fn has_active_claim<'a>(
+    entries: impl IntoIterator<Item = &'a LedgerEntry>,
+    ended_runs: &EndedClaimRuns<'_>,
+) -> bool {
+    active_claim(entries).is_some_and(|claim| !ended_runs.ends(claim))
 }
 
 /// The claim entry that still holds this work item's lease, if any, so the
@@ -127,23 +130,46 @@ fn active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> Optio
 /// read here happens only once `active_claim` has found a non-stale claim,
 /// not on every dispatch.
 fn claim_run_has_ended(cfg: &GahConfig, claim: &LedgerEntry) -> bool {
-    let Some(session_dir) = claim.session_dir.as_deref() else {
+    if claim.session_dir.is_none() {
         return false;
-    };
-    let entries = match ledger::read_entries(cfg) {
-        Ok(entries) => entries,
+    }
+    match ledger::read_entries(cfg) {
+        Ok(entries) => EndedClaimRuns::from_entries(&entries).ends(claim),
         Err(e) => {
             eprintln!("warning: failed to read ledger entries: {:#}", e);
-            return false;
+            false
         }
-    };
-    entries.iter().any(|entry| {
-        entry.session_dir.as_deref() == Some(session_dir)
-            && entry.repo_id == claim.repo_id
-            && entry.mode != "claim"
-            && !is_control_record(&entry.mode)
-            && !crate::ledger::is_entry_stale(entry)
-    })
+    }
+}
+
+/// The `(repo_id, session_dir)` pairs whose run wrote a non-stale execution
+/// or outcome entry: the one rule, shared by dispatch's duplicate check and
+/// ticket discovery, for when a claim's run has ended (#1466). Discovery
+/// builds it once per scan rather than reading the ledger per ticket.
+#[derive(Debug, Default)]
+struct EndedClaimRuns<'a>(std::collections::HashSet<(&'a str, &'a str)>);
+
+impl<'a> EndedClaimRuns<'a> {
+    fn from_entries(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> Self {
+        Self(
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.mode != "claim"
+                        && !is_control_record(&entry.mode)
+                        && !crate::ledger::is_entry_stale(entry)
+                })
+                .filter_map(|entry| Some((entry.repo_id.as_str(), entry.session_dir.as_deref()?)))
+                .collect(),
+        )
+    }
+
+    fn ends(&self, claim: &LedgerEntry) -> bool {
+        claim
+            .session_dir
+            .as_deref()
+            .is_some_and(|session_dir| self.0.contains(&(claim.repo_id.as_str(), session_dir)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,7 +496,14 @@ impl AvailableTicket {
         index: &crate::ledger::LedgerEntriesByWorkId,
     ) -> Option<String> {
         let mut reason = None;
-        ledger_lookup_with_setup_reason(Some(work_id), profile, &[], index, &mut reason)?;
+        ledger_lookup_with_setup_reason(
+            Some(work_id),
+            profile,
+            &[],
+            index,
+            &EndedClaimRuns::default(),
+            &mut reason,
+        )?;
         reason
     }
 }
@@ -539,20 +572,35 @@ fn repeated_setup_reason(attempts: &[&LedgerEntry]) -> Option<String> {
 /// ticket should be dropped from the candidate list entirely (a merged MR
 /// anywhere in its history means it's done -- prior failed attempts before
 /// that merge shouldn't count toward AUTO_RETRY_CAP and trigger
-/// HumanRequired on a completed ticket).
-fn ledger_lookup_for_ticket(
+/// HumanRequired on a completed ticket). `ended_runs` is built once per
+/// scan from the whole ledger (#1466).
+fn ledger_lookup_for_scan(
     work_id: Option<&str>,
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+    ended_runs: &EndedClaimRuns<'_>,
 ) -> Option<TicketHistoryLookup> {
     ledger_lookup_with_setup_reason(
         work_id,
         profile,
         all_mrs,
         ledger_entries_by_work_id,
+        ended_runs,
         &mut None,
     )
+}
+
+/// Test shorthand: ended runs taken from the index itself.
+#[cfg(test)]
+fn ledger_lookup_for_ticket(
+    work_id: Option<&str>,
+    profile: &Profile,
+    all_mrs: &[crate::sync::SyncMr],
+    index: &crate::ledger::LedgerEntriesByWorkId,
+) -> Option<TicketHistoryLookup> {
+    let ended_runs = EndedClaimRuns::from_entries(index.values().flatten());
+    ledger_lookup_for_scan(work_id, profile, all_mrs, index, &ended_runs)
 }
 
 fn ledger_lookup_with_setup_reason(
@@ -560,6 +608,7 @@ fn ledger_lookup_with_setup_reason(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+    ended_runs: &EndedClaimRuns<'_>,
     setup_reason: &mut Option<String>,
 ) -> Option<TicketHistoryLookup> {
     let Some(wid) = work_id else {
@@ -577,6 +626,7 @@ fn ledger_lookup_with_setup_reason(
             .into_iter()
             .flatten()
             .filter(|e| e.repo_id == profile.repo_id),
+        ended_runs,
     );
     for e in entries.into_iter().flatten() {
         // The ledger is a single global file shared by every profile
@@ -782,15 +832,24 @@ pub(crate) fn scan_available_tickets(
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Vec<AvailableTicket> {
-    scan_available_tickets_with_dependencies(profile, all_mrs, ledger_entries_by_work_id)
+    let entries: Vec<LedgerEntry> = ledger_entries_by_work_id
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
+    scan_available_tickets_with_dependencies(profile, all_mrs, ledger_entries_by_work_id, &entries)
         .available_tickets
 }
 
+/// `ledger_entries` is the ledger the index was built from: a claim whose
+/// run wrote an entry under another work id (or none) is not active (#1466).
 pub(crate) fn scan_available_tickets_with_dependencies(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+    ledger_entries: &[LedgerEntry],
 ) -> TicketScan {
+    let ended_runs = EndedClaimRuns::from_entries(ledger_entries);
     let mut candidates = vec![];
     let closed_ids = closed_ticket_numbers(profile);
 
@@ -816,11 +875,12 @@ pub(crate) fn scan_available_tickets_with_dependencies(
                 human_required,
                 has_active_claim,
                 human_required_reason_code,
-            )) = ledger_lookup_for_ticket(
+            )) = ledger_lookup_for_scan(
                 work_id.as_deref(),
                 profile,
                 all_mrs,
                 ledger_entries_by_work_id,
+                &ended_runs,
             )
             else {
                 continue;
@@ -962,11 +1022,12 @@ pub(crate) fn scan_available_tickets_with_dependencies(
             human_required,
             has_active_claim,
             human_required_reason_code,
-        )) = ledger_lookup_for_ticket(
+        )) = ledger_lookup_for_scan(
             work_id.as_deref(),
             profile,
             all_mrs,
             ledger_entries_by_work_id,
+            &ended_runs,
         )
         else {
             continue;

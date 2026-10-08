@@ -507,6 +507,7 @@ fn intake_skips_issues_another_login_holds() {
         &prof,
         &[],
         &Default::default(),
+        &[],
     );
 
     assert_eq!(scan.provider_error, None);
@@ -552,6 +553,7 @@ fn intake_fails_closed_when_the_signed_in_login_is_unknown() {
         &prof,
         &[],
         &Default::default(),
+        &[],
     );
 
     assert!(scan.available_tickets.is_empty());
@@ -616,7 +618,7 @@ fn a_lost_claim_does_not_count_as_an_attempt_on_the_issue() {
     let index = crate::ledger::index_entries_by_work_id(&[lost]);
 
     let scan =
-        crate::dispatch::claims::scan_available_tickets_with_dependencies(&prof, &[], &index);
+        crate::dispatch::claims::scan_available_tickets_with_dependencies(&prof, &[], &index, &[]);
 
     assert_eq!(scan.available_tickets.len(), 1);
     assert_eq!(scan.available_tickets[0].prior_attempt_count, 0);

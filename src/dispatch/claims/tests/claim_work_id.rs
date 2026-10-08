@@ -197,3 +197,54 @@ fn claim_without_a_session_directory_stays_active() {
         .downcast_ref::<ActiveClaimError>()
         .is_some());
 }
+
+/// Discovery (`gah loop`, `gah status`) applies the same rule: a claim
+/// whose run recorded its terminal entry under the branch no longer marks
+/// the ticket claimed, and a claim with no ending entry still does.
+#[test]
+fn discovery_does_not_report_a_claim_whose_run_ended_under_the_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ticket_dir = tmp.path().join("docs/tickets");
+    fs::create_dir_all(&ticket_dir).unwrap();
+    fs::write(
+        ticket_dir.join("TICKET-500-test.md"),
+        "# TICKET-500: Test\n\nGoal: test claim guard\n",
+    )
+    .unwrap();
+    let mut prof = profile(tmp.path());
+    prof.local_path = tmp.path().display().to_string();
+    prof.provider = String::new();
+
+    let session_dir = tmp.path().join("sessions").join("run-1");
+    let mut claim = LedgerEntry::new_claim("test", &prof, "TICKET-500");
+    claim.session_dir = Some(session_dir.display().to_string());
+    let claimed = |entries: &[LedgerEntry]| {
+        let index = crate::ledger::index_entries_by_work_id(entries);
+        let scan = scan_available_tickets_with_dependencies(&prof, &[], &index, entries);
+        assert_eq!(scan.available_tickets.len(), 1);
+        scan.available_tickets[0].has_active_claim
+    };
+
+    assert!(claimed(std::slice::from_ref(&claim)));
+
+    let mut ended = LedgerEntry::new(
+        "test",
+        &prof,
+        "codex",
+        "improve",
+        "TICKET-500-test.md",
+        Some("run-1".into()),
+        Some(&session_dir),
+    );
+    ended.work_id = Some("gah/repo-1700000000-abc123".into());
+    ended.branch = ended.work_id.clone();
+    ended.set_failure(
+        crate::ledger::FailureClass::AgentNoProgress,
+        crate::ledger::FailureStage::PostValidation,
+    );
+    assert!(!claimed(&[claim.clone(), ended.clone()]));
+
+    // Another run's entry says nothing about this claim.
+    ended.session_dir = Some(tmp.path().join("sessions/run-0").display().to_string());
+    assert!(claimed(&[claim, ended]));
+}

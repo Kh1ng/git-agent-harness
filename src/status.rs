@@ -664,6 +664,7 @@ fn build_snapshot_inner(
             profile,
             &raw_mrs,
             &ledger_entries_by_work_id,
+            entries,
         )
     } else {
         crate::dispatch::TicketScan::default()
