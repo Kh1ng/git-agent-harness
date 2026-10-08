@@ -1722,3 +1722,17 @@ sections stay hints. With `--mr` or `--existing-branch`, the scope check also
 counts changes already on the branch.
 
 A profile env file cannot set `GAH_ENFORCE_JOB_FILE`; only the `--enforce-job-file` flag turns enforcement on.
+
+## Manager log
+
+Manager observations are appended to `manager-log.jsonl` beside the ledger;
+`GAH_LEDGER_PATH` also isolates this log. Nothing reads it to make decisions yet.
+
+Append an event with `gah manager-log add --work-id TICKET-1475 --phase verify --attempt 1 --tokens 200 --outcome passed`.
+Inspect events with `gah manager-log show --work-id TICKET-1475 --json`;
+add `--summary` for per-item totals and maxima. Both commands accept `--config-path`.
+
+Phases: `research`, `implement`, `repair`, `supervise`, `verify`, `merge`.
+Diagnoses: `setup_environment`, `credentials`, `failed_check`, `misunderstood_task`,
+`ambiguous_requirement`, `unknown`.
+`--work-id` and the summary treat `#12`, `TICKET-12` and a bare `12` as one item.
