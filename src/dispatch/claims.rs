@@ -235,6 +235,15 @@ pub(crate) fn target_work_id(profile: &Profile, args: &DispatchArgs) -> Option<S
     }
 }
 
+/// The work id a manual worker claims: the target file's, or an issue
+/// number target (`123`, `#123`) itself.
+pub(crate) fn manual_worker_work_id(profile: &Profile, args: &DispatchArgs) -> Option<String> {
+    target_work_id(profile, args).or_else(|| {
+        super::issues::is_issue_number_reference(&args.target)
+            .then(|| args.target.trim().to_string())
+    })
+}
+
 /// Refuses `work_id` when another in-flight worker claimed it or an open
 /// PR/MR already carries it; otherwise hands it back for this run to claim.
 fn check_claimed_or_open(

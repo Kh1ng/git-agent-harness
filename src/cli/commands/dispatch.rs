@@ -112,7 +112,7 @@ pub fn run(args: Args) -> Result<()> {
         dispatch_reason,
         ..args.into()
     };
-    let _claim = if manual_worker && !dispatch_args.dry_run {
+    let claim = if manual_worker && !dispatch_args.dry_run {
         let claim = ManualClaim::take(&cfg, &dispatch_args)?;
         // The same node admission a loop worker passes: free memory above the
         // floor with this job's reservation, CPU and pressure. Only the
@@ -121,19 +121,26 @@ pub fn run(args: Args) -> Result<()> {
             Some(controller_runtime::RouteNodeAdmission::single_worker(
                 controller_runtime::NextAction::DispatchTicket {
                     ticket_path: dispatch_args.target.clone(),
-                    work_id: claim.as_ref().map(|claim| claim.work_id.clone()),
+                    work_id: Some(claim.work_id.clone()),
                     recommended_backend: Some(dispatch_args.backend.clone()),
                     recommended_model: dispatch_args.model.clone(),
                     reason: "manual worker".to_string(),
                 },
                 cfg.defaults.node_capacity,
             ));
-        claim
+        Some(claim)
     } else {
         None
     };
-    let outcome =
-        controller_runtime::run_dispatch_and_record(&cfg, "dispatch", None, &dispatch_args)?;
+    // The start event names the claimed work id, which is how the loop's
+    // reconciliation tells this live run from an abandoned one.
+    let claimed_work_id = claim.as_ref().map(|claim| claim.work_id.as_str());
+    let outcome = controller_runtime::run_dispatch_and_record(
+        &cfg,
+        "dispatch",
+        claimed_work_id,
+        &dispatch_args,
+    )?;
     if manual_worker {
         if let Some(reason) = outcome {
             anyhow::bail!("Manual worker did not start: {reason}");
@@ -152,11 +159,15 @@ struct ManualClaim {
 }
 
 impl ManualClaim {
-    /// `None` when the target names no work id: there is nothing to claim.
-    fn take(cfg: &config::GahConfig, args: &CliDispatchArgs) -> Result<Option<Self>> {
+    /// Refuses a target that resolves to no work id: it could not be
+    /// claimed, so the loop could start the same work alongside it.
+    fn take(cfg: &config::GahConfig, args: &CliDispatchArgs) -> Result<Self> {
         let profile = config::get_profile(cfg, &args.profile)?;
-        let Some(work_id) = crate::dispatch::target_work_id(profile, args) else {
-            return Ok(None);
+        let Some(work_id) = crate::dispatch::manual_worker_work_id(profile, args) else {
+            anyhow::bail!(
+                "Manual worker did not start: no work id could be resolved from {:?}; pass a ticket file, a candidate file or an issue number",
+                args.target
+            );
         };
         let work_id = crate::work_claim::normalize_work_identity(&work_id);
         let scope = crate::work_claim::canonical_claim_scope(&args.profile, &profile.repo_id);
@@ -165,7 +176,7 @@ impl ManualClaim {
                 "Manual worker did not start: {work_id} is already being worked on by the loop or another worker"
             );
         }
-        Ok(Some(Self { scope, work_id }))
+        Ok(Self { scope, work_id })
     }
 }
 
@@ -203,23 +214,12 @@ fn prepare_manual_worker(cfg: &mut config::GahConfig, args: &Args) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn manual_launch_overrides_only_its_model_cap_and_reasoning_in_memory() {
-        let mut cfg: crate::config::GahConfig = toml::from_str("[profiles]\n").unwrap();
-        let mut profile = crate::config::tests::test_profile_for_notifications();
-        profile
-            .max_concurrent_per_model
-            .insert("codex/gpt-6.1-sol".into(), 1);
-        profile
-            .max_concurrent_per_model
-            .insert("claude/opus".into(), 2);
-        profile.codex_args = vec!["--sandbox".into(), "workspace-write".into()];
-        cfg.profiles.insert("repo".into(), profile);
-        let args = super::Args {
+    fn manual_args(target: &str) -> super::Args {
+        super::Args {
             profile: "repo".into(),
             mode: "improve".into(),
             backend: "codex".into(),
-            target: "ticket.md".into(),
+            target: target.into(),
             model: Some("gpt-6.1-sol".into()),
             manual_worker: true,
             enforce_job_file: false,
@@ -239,7 +239,60 @@ mod tests {
             escalate: false,
             existing_branch: None,
             skip_validation_gate: false,
-        };
+        }
+    }
+
+    fn manual_config() -> crate::config::GahConfig {
+        let mut cfg: crate::config::GahConfig = toml::from_str("[profiles]\n").unwrap();
+        let profile = crate::config::tests::test_profile_for_notifications();
+        cfg.profiles.insert("repo".into(), profile);
+        cfg
+    }
+
+    #[test]
+    fn manual_worker_claims_an_issue_number_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _claims = crate::test_support::ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
+        let cfg = manual_config();
+        for target in ["123", "#123", " #123 "] {
+            let claim = super::ManualClaim::take(&cfg, &manual_args(target).into()).unwrap();
+            assert_eq!(claim.work_id, "#123", "{target:?}");
+            assert!(crate::work_claim::is_claimed(&claim.scope, "#123").unwrap());
+            // The loop cannot take the same issue while the worker runs.
+            assert!(!crate::work_claim::try_claim_work(&claim.scope, "123").unwrap());
+            let scope = claim.scope.clone();
+            drop(claim);
+            assert!(!crate::work_claim::is_claimed(&scope, "#123").unwrap());
+        }
+    }
+
+    #[test]
+    fn manual_worker_refuses_a_target_with_no_work_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _claims = crate::test_support::ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
+        let cfg = manual_config();
+        let missing = tmp.path().join("missing.md").display().to_string();
+        for target in ["fix the flaky test", missing.as_str()] {
+            let Err(error) = super::ManualClaim::take(&cfg, &manual_args(target).into()) else {
+                panic!("{target:?} ran unclaimed");
+            };
+            assert!(error.to_string().contains("no work id"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn manual_launch_overrides_only_its_model_cap_and_reasoning_in_memory() {
+        let mut cfg: crate::config::GahConfig = toml::from_str("[profiles]\n").unwrap();
+        let mut profile = crate::config::tests::test_profile_for_notifications();
+        profile
+            .max_concurrent_per_model
+            .insert("codex/gpt-6.1-sol".into(), 1);
+        profile
+            .max_concurrent_per_model
+            .insert("claude/opus".into(), 2);
+        profile.codex_args = vec!["--sandbox".into(), "workspace-write".into()];
+        cfg.profiles.insert("repo".into(), profile);
+        let args = manual_args("ticket.md");
         super::prepare_manual_worker(&mut cfg, &args).unwrap();
         let profile = &cfg.profiles["repo"];
         assert!(!profile

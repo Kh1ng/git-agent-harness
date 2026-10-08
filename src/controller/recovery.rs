@@ -153,18 +153,33 @@ pub(crate) fn import_requested_changes(
 /// Finish runs left behind by a killed controller with both durable surfaces:
 /// the event stream used for live activity and the normalized ledger used for
 /// routing/usage reports. `run_once` calls this after acquiring the profile
-/// lock, so an open start is provably abandoned rather than merely slow.
+/// lock, so a loop run left open is provably abandoned rather than merely
+/// slow. Manual workers (`gah dispatch --manual-worker`) skip that lock, so a
+/// run whose work id a live manual worker still claims is left alone.
 pub(crate) fn reconcile_abandoned_dispatches(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     entries: &mut Vec<crate::ledger::LedgerEntry>,
 ) -> Result<usize> {
     let events = crate::events::read_events(cfg)?;
-    let orphans = crate::events::orphaned_dispatch_runs(&events, profile_name);
+    let mut orphans = crate::events::orphaned_dispatch_runs(&events, profile_name);
     if orphans.is_empty() {
         return Ok(0);
     }
     let profile = crate::config::get_profile(cfg, profile_name)?;
+    let scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
+    let live = match crate::work_claim::live_manual_work_ids(&scope) {
+        Ok(live) => live,
+        Err(error) => {
+            eprintln!("gah loop: not reconciling open runs, claims unreadable: {error:#}");
+            return Ok(0);
+        }
+    };
+    orphans.retain(|(_, work_id)| {
+        !work_id.as_deref().is_some_and(|work_id| {
+            live.contains(&crate::work_claim::normalize_work_identity(work_id))
+        })
+    });
     let existing_sessions: HashSet<String> = entries
         .iter()
         .filter_map(|entry| entry.session_id.clone())
@@ -740,6 +755,8 @@ pub(super) fn report_blocked_work_items_once(
     Ok(())
 }
 
+#[cfg(test)]
+mod manual_worker_tests;
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1352,7 +1369,8 @@ default_target_branch = "main"
 
     #[test]
     fn once_reconciliation_writes_terminal_event_and_unknown_ledger_record() {
-        let (_tmp, mut cfg) = event_test_config();
+        let (tmp, mut cfg) = event_test_config();
+        let _claims = crate::test_support::ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
         let profile: crate::config::Profile = toml::from_str(
             r#"
 display_name = "Real"

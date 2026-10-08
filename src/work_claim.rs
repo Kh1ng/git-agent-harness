@@ -497,6 +497,9 @@ fn save_state(state: &WorkClaimState) -> Result<()> {
     Ok(())
 }
 
+/// A loop claim older than this is reclaimed; see `WorkClaim::is_stale`.
+const CLAIM_MAX_AGE_SECS: u64 = 3600;
+
 /// Claim a work_id for a profile and persist to file
 /// Atomically claim work across independent GAH processes.
 pub fn try_claim_work(profile: &str, work_id: &str) -> Result<bool> {
@@ -514,8 +517,7 @@ fn try_claim_with_mode(profile: &str, work_id: &str, manual_worker: bool) -> Res
 
         // Check if there's an existing claim and if it's stale
         if state.is_claimed(profile, work_id) {
-            if state.is_claim_stale(profile, work_id, 3600) {
-                // 1 hour max age
+            if state.is_claim_stale(profile, work_id, CLAIM_MAX_AGE_SECS) {
                 // Reclaim the stale claim
                 state.release(profile, work_id);
             } else {
@@ -525,6 +527,29 @@ fn try_claim_with_mode(profile: &str, work_id: &str, manual_worker: bool) -> Res
 
         state.claim_with_mode(profile, work_id, manual_worker);
         Ok(true)
+    })
+}
+
+/// Work ids (normalized) that a manual worker still holds: its local
+/// process is alive, or it runs on another host and the claim would still
+/// block a new one. Manual workers run outside the profile lock, so the loop
+/// asks this before it closes out their open runs as abandoned.
+pub fn live_manual_work_ids(profile: &str) -> Result<std::collections::HashSet<String>> {
+    with_locked_state(|state| {
+        Ok(state
+            .claims
+            .get(profile)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| match entry {
+                WorkClaimStateEntry::V2(claim)
+                    if claim.manual_worker && !claim.is_stale(CLAIM_MAX_AGE_SECS) =>
+                {
+                    Some(normalize_work_identity(&claim.work_id))
+                }
+                _ => None,
+            })
+            .collect())
     })
 }
 
