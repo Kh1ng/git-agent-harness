@@ -159,16 +159,19 @@ fn profile_chooses_sandbox(args: &[String]) -> bool {
 /// the effective mode is the `-s`/`--sandbox` flag (the last one given) and,
 /// only without a flag, a `sandbox_mode` config override, as the CLI
 /// resolves them. `danger-full-access` keeps the wrapper; any other mode
-/// drops it. A named Codex profile (`-p`) may choose a sandbox GAH cannot
+/// drops it. `--full-auto` means `--sandbox workspace-write` when neither a
+/// flag nor a config override names a mode, so it drops it too. A named Codex profile (`-p`) may choose a sandbox GAH cannot
 /// see and keeps the wrapper. Other backends and runs GAH leaves unsandboxed
 /// are unaffected.
 fn sandbox_blocks_sccache(gah_default: bool, args: &[String]) -> bool {
     let mut flag_mode: Option<&str> = None;
     let mut config_mode: Option<&str> = None;
+    let mut full_auto = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--yolo" | "--dangerously-bypass-approvals-and-sandbox" => return false,
+            "--full-auto" => full_auto = true,
             "-s" | "--sandbox" => {
                 if let Some(mode) = args.next() {
                     flag_mode = Some(mode);
@@ -195,7 +198,7 @@ fn sandbox_blocks_sccache(gah_default: bool, args: &[String]) -> bool {
     }
     match flag_mode.or(config_mode) {
         Some(mode) => mode.trim().trim_matches(|c| c == '"' || c == '\'') != "danger-full-access",
-        None => gah_default,
+        None => gah_default || full_auto,
     }
 }
 
@@ -326,6 +329,11 @@ mod tests {
             vec!["-c", "sandbox_mode='read-only'"],
             vec!["--config=sandbox_mode=\"workspace-write\""],
             vec!["-c", "sandbox_mode = \"workspace-write\""],
+            // `--full-auto` is `--sandbox workspace-write`.
+            vec!["--full-auto"],
+            vec!["--full-auto", "-c", "model=gpt"],
+            vec!["--full-auto", "-s", "read-only"],
+            vec!["--full-auto", "-c", "sandbox_mode=\"workspace-write\""],
         ] {
             assert!(
                 sandbox_blocks_sccache(false, &args(&sandboxed)),
@@ -343,6 +351,12 @@ mod tests {
             vec!["--sandbox", "read-only", "--yolo"],
             // A named profile's sandbox is invisible to GAH; keep the wrapper.
             vec!["-p", "locked-down"],
+            // An explicit mode or a bypass flag overrides `--full-auto`.
+            vec!["--full-auto", "--sandbox", "danger-full-access"],
+            vec!["--sandbox=danger-full-access", "--full-auto"],
+            vec!["--full-auto", "-c", "sandbox_mode=\"danger-full-access\""],
+            vec!["--full-auto", "--yolo"],
+            vec!["--dangerously-bypass-approvals-and-sandbox", "--full-auto"],
         ] {
             assert!(!sandbox_blocks_sccache(false, &args(&open)), "{open:?}");
         }
