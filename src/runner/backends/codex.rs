@@ -53,6 +53,15 @@ pub(crate) fn run_with_executable(
     {
         cmd.arg("--add-dir").arg(target);
     }
+    // Issue #1464: sccache cannot work inside that sandbox, so the worker
+    // compiles without the wrapper rather than failing every build.
+    let drop_wrapper =
+        sandbox_blocks_sccache(implementation && !profile_sets_sandbox, &filtered_extra);
+    let child_env: Vec<(String, String)> = env_vars
+        .iter()
+        .filter(|(key, _)| !(drop_wrapper && key == "RUSTC_WRAPPER"))
+        .cloned()
+        .collect();
 
     cmd.args(filtered_extra)
         .args(codex_model_args(model))
@@ -60,7 +69,7 @@ pub(crate) fn run_with_executable(
             env_vars,
         ))
         .current_dir(worktree);
-    crate::runner::apply_child_env(&mut cmd, env_vars);
+    crate::runner::apply_child_env(&mut cmd, &child_env);
 
     let worktree_before = write_refusal::worktree_state(worktree);
     let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
@@ -137,11 +146,257 @@ fn profile_chooses_sandbox(args: &[String]) -> bool {
     })
 }
 
+/// Issue #1464: does this run's Codex sandbox block `sccache`? When sccache
+/// is on PATH, `build_cache::ScopedCargoTarget::environment` sets
+/// `RUSTC_WRAPPER` to it. sccache keeps its cache outside the target
+/// directory and talks to a local server over TCP (127.0.0.1:4226); a
+/// `read-only` or `workspace-write` sandbox allows neither, so every
+/// `cargo build` the worker ran would fail. Such a run drops the wrapper and
+/// compiles cold.
+///
+/// `gah_default` is whether GAH itself added `--sandbox workspace-write`.
+/// Profile codex_args then decide: a bypass flag keeps the wrapper; otherwise
+/// the effective mode is the `-s`/`--sandbox` flag (the last one given) and,
+/// only without a flag, a `sandbox_mode` config override, as the CLI
+/// resolves them. `danger-full-access` keeps the wrapper; any other mode
+/// drops it. `--full-auto` means `--sandbox workspace-write` when neither a
+/// flag nor a config override names a mode, so it drops it too. A named Codex profile (`-p`) may choose a sandbox GAH cannot
+/// see and keeps the wrapper. Other backends and runs GAH leaves unsandboxed
+/// are unaffected.
+fn sandbox_blocks_sccache(gah_default: bool, args: &[String]) -> bool {
+    let mut flag_mode: Option<&str> = None;
+    let mut config_mode: Option<&str> = None;
+    let mut full_auto = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--yolo" | "--dangerously-bypass-approvals-and-sandbox" => return false,
+            "--full-auto" => full_auto = true,
+            "-s" | "--sandbox" => {
+                if let Some(mode) = args.next() {
+                    flag_mode = Some(mode);
+                }
+            }
+            _ => {
+                if let Some(mode) = arg
+                    .strip_prefix("--sandbox=")
+                    .or_else(|| arg.strip_prefix("-s="))
+                {
+                    flag_mode = Some(mode);
+                } else if let Some(mode) = arg
+                    .strip_prefix("--config=")
+                    .or_else(|| arg.strip_prefix("-c="))
+                    .unwrap_or(arg)
+                    .trim_start()
+                    .strip_prefix("sandbox_mode")
+                    .and_then(|rest| rest.trim_start().strip_prefix('='))
+                {
+                    config_mode = Some(mode);
+                }
+            }
+        }
+    }
+    match flag_mode.or(config_mode) {
+        Some(mode) => mode.trim().trim_matches(|c| c == '"' || c == '\'') != "danger-full-access",
+        None => gah_default || full_auto,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runner::backends::test_util::*;
     use std::fs;
+
+    const SCCACHE: &str = "/usr/local/bin/sccache";
+
+    /// Env the dispatcher hands Codex on an sccache host: PATH plus the
+    /// `ScopedCargoTarget::environment` pair.
+    fn sccache_host_env(f: &Fixture) -> Vec<(String, String)> {
+        vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            (
+                "CARGO_TARGET_DIR".to_string(),
+                f.worktree
+                    .join("build-cache/attempt-1/target")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ("RUSTC_WRAPPER".to_string(), SCCACHE.to_string()),
+        ]
+    }
+
+    fn env_has(record_dir: &Path, key: &str) -> bool {
+        recorded_env(record_dir)
+            .lines()
+            .any(|line| line.starts_with(&format!("{key}=")))
+    }
+
+    // ── sandbox vs sccache (issue #1464) ─────────────────────────────────
+
+    #[test]
+    fn run_codex_sandboxed_implementation_run_drops_the_sccache_wrapper() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+
+        run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &sccache_host_env(&f),
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--sandbox", "workspace-write"]));
+        assert!(
+            !env_has(&f.record_dir, "RUSTC_WRAPPER"),
+            "sandboxed run kept RUSTC_WRAPPER: {}",
+            recorded_env(&f.record_dir)
+        );
+        // Only the wrapper goes; the isolated target directory stays.
+        assert!(env_has(&f.record_dir, "CARGO_TARGET_DIR"));
+    }
+
+    #[test]
+    fn run_codex_unsandboxed_runs_keep_the_sccache_wrapper() {
+        for (profile_args, intent) in [
+            (
+                vec!["--sandbox=danger-full-access"],
+                WriteIntent::Implementation,
+            ),
+            (
+                vec!["-s", "danger-full-access"],
+                WriteIntent::Implementation,
+            ),
+            (
+                vec!["--dangerously-bypass-approvals-and-sandbox"],
+                WriteIntent::Implementation,
+            ),
+            (vec!["--yolo"], WriteIntent::Implementation),
+            // Read-only dispatches get no sandbox flag from GAH.
+            (vec![], WriteIntent::ReadOnly),
+        ] {
+            let _exec_guard = crate::test_support::ExecGuard::new();
+            let f = fixture();
+            make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+            let extra: Vec<String> = profile_args.iter().map(|arg| arg.to_string()).collect();
+
+            run_with_executable(
+                Path::new("codex"),
+                &f.worktree,
+                "task",
+                &f.session_dir,
+                None,
+                &extra,
+                &sccache_host_env(&f),
+                300,
+                intent,
+            )
+            .unwrap();
+
+            assert!(
+                recorded_env(&f.record_dir).contains(&format!("RUSTC_WRAPPER={SCCACHE}")),
+                "{profile_args:?} {intent:?} lost RUSTC_WRAPPER: {}",
+                recorded_env(&f.record_dir)
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_blocks_sccache_follows_the_effective_sandbox_mode() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|a| a.to_string()).collect() };
+        // GAH's own workspace-write default, with or without unrelated args.
+        assert!(sandbox_blocks_sccache(true, &args(&[])));
+        assert!(sandbox_blocks_sccache(true, &args(&["-c", "model=gpt"])));
+        // Nothing sandboxes a run GAH left alone.
+        assert!(!sandbox_blocks_sccache(false, &args(&[])));
+        // Explicit profile sandboxes.
+        for sandboxed in [
+            vec!["-s", "read-only"],
+            vec!["--sandbox", "workspace-write"],
+            vec!["--sandbox=read-only"],
+            vec!["-s=workspace-write"],
+            vec!["-c", "sandbox_mode=\"read-only\""],
+            vec!["-c", "sandbox_mode='read-only'"],
+            vec!["--config=sandbox_mode=\"workspace-write\""],
+            vec!["-c", "sandbox_mode = \"workspace-write\""],
+            // `--full-auto` is `--sandbox workspace-write`.
+            vec!["--full-auto"],
+            vec!["--full-auto", "-c", "model=gpt"],
+            vec!["--full-auto", "-s", "read-only"],
+            vec!["--full-auto", "-c", "sandbox_mode=\"workspace-write\""],
+        ] {
+            assert!(
+                sandbox_blocks_sccache(false, &args(&sandboxed)),
+                "{sandboxed:?}"
+            );
+        }
+        for open in [
+            vec!["-s", "danger-full-access"],
+            vec!["--sandbox=danger-full-access"],
+            vec!["-c", "sandbox_mode=\"danger-full-access\""],
+            vec!["--config=sandbox_mode=\"danger-full-access\""],
+            vec!["--yolo"],
+            vec!["--dangerously-bypass-approvals-and-sandbox"],
+            // A bypass flag wins over any sandbox mode.
+            vec!["--sandbox", "read-only", "--yolo"],
+            // A named profile's sandbox is invisible to GAH; keep the wrapper.
+            vec!["-p", "locked-down"],
+            // An explicit mode or a bypass flag overrides `--full-auto`.
+            vec!["--full-auto", "--sandbox", "danger-full-access"],
+            vec!["--sandbox=danger-full-access", "--full-auto"],
+            vec!["--full-auto", "-c", "sandbox_mode=\"danger-full-access\""],
+            vec!["--full-auto", "--yolo"],
+            vec!["--dangerously-bypass-approvals-and-sandbox", "--full-auto"],
+        ] {
+            assert!(!sandbox_blocks_sccache(false, &args(&open)), "{open:?}");
+        }
+        // Among sandbox flags the last wins.
+        assert!(!sandbox_blocks_sccache(
+            false,
+            &args(&["-s", "read-only", "--sandbox=danger-full-access"])
+        ));
+        assert!(sandbox_blocks_sccache(
+            false,
+            &args(&["--sandbox=danger-full-access", "-s", "read-only"])
+        ));
+        // The flag beats a sandbox_mode config override in either order.
+        assert!(sandbox_blocks_sccache(
+            false,
+            &args(&[
+                "-s",
+                "read-only",
+                "-c",
+                "sandbox_mode=\"danger-full-access\""
+            ])
+        ));
+        assert!(sandbox_blocks_sccache(
+            false,
+            &args(&[
+                "-c",
+                "sandbox_mode=\"danger-full-access\"",
+                "-s",
+                "read-only"
+            ])
+        ));
+        assert!(!sandbox_blocks_sccache(
+            false,
+            &args(&[
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "--sandbox=danger-full-access"
+            ])
+        ));
+    }
     // ── run_codex ────────────────────────────────────────────────────────
 
     #[test]

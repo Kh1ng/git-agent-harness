@@ -27,6 +27,8 @@ const LIFECYCLE_LOCK: &str = ".cargo-targets.lifecycle.lock";
 /// while turning most of that repeat compilation into cache hits. Only wired
 /// in when the binary is actually on PATH -- environments without it fall
 /// back to the prior always-cold-compile behavior rather than failing.
+/// Sandboxed Codex runs cannot reach sccache's cache or server and drop the
+/// wrapper again before launch (issue #1464, `runner::backends::codex`).
 fn sccache_wrapper() -> Option<String> {
     crate::runner::resolve::resolve_executable_on_path("sccache")
         .map(|path| path.to_string_lossy().into_owned())
