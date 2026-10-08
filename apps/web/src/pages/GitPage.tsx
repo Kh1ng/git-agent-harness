@@ -105,7 +105,7 @@ export function GitPage() {
                 <button
                   key={t.id}
                   onClick={() => setTab(t.id)}
-                  className={`px-3 py-1.5 ${tab === t.id ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+                  className={`px-3 py-1.5 ${tab === t.id ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
                 >
                   {t.label}
                 </button>

@@ -18,6 +18,8 @@ export default {
         secondary: 'rgb(var(--ink-secondary) / <alpha-value>)',
         muted: 'rgb(var(--ink-muted) / <alpha-value>)',
         accent: 'rgb(var(--accent) / <alpha-value>)',
+        // Fill behind white text (4.5:1 in both themes); `accent` alone is for text and outlines.
+        'accent-fill': 'rgb(var(--accent-fill) / <alpha-value>)',
         good: 'rgb(var(--status-good) / <alpha-value>)',
         warning: 'rgb(var(--status-warning) / <alpha-value>)',
         serious: 'rgb(var(--status-serious) / <alpha-value>)',

@@ -1987,7 +1987,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
                   onClick={() => applyPaletteSelection(cmd)}
                   onMouseEnter={() => setPaletteIndex(i)}
                   className={`w-full text-left px-3 py-1.5 text-xs flex items-baseline gap-2 ${
-                    i === paletteIndex ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'
+                    i === paletteIndex ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'
                   }`}
                 >
                   <span className="font-mono shrink-0">/{cmd.name}</span>

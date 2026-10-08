@@ -153,7 +153,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
       </div>
 
       {scalingError && <p role="alert" className="mt-3 text-xs text-critical">{scalingError}</p>}
-      <button onClick={saveScaling} disabled={saving || scalingError != null} className={`mt-3 bg-accent text-white hover:bg-accent/90 ${BUTTON_CLASS}`}>
+      <button onClick={saveScaling} disabled={saving || scalingError != null} className="mt-3 btn-primary">
         {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         Save scaling settings
       </button>
@@ -193,7 +193,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
             </p>
           </div>
           {boostError && <p role="alert" className="mt-3 text-xs text-critical">{boostError}</p>}
-          <button onClick={startBoost} disabled={saving || boostError != null} className={`mt-3 bg-accent text-white hover:bg-accent/90 ${BUTTON_CLASS}`}>
+          <button onClick={startBoost} disabled={saving || boostError != null} className="mt-3 btn-primary">
             <Zap size={14} aria-hidden="true" />
             Add workers
           </button>

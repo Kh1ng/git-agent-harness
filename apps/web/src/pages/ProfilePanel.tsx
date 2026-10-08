@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, Save, Loader2 } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { ExternalAnchor } from '../components/ExternalAnchor';
@@ -136,7 +136,7 @@ interface DispatchSettingsSectionProps {
   profileError: string | null;
 }
 
-function DispatchSettingsSection({
+export function DispatchSettingsSection({
   selectedName,
   selected,
   profileLoading,
@@ -144,6 +144,7 @@ function DispatchSettingsSection({
 }: DispatchSettingsSectionProps) {
   const updateProfile = useGahStore((s) => s.updateProfile);
   const profileCrud = useGahStore((s) => s.profileCrud);
+  const fieldId = useId();
 
   const [parallel, setParallel] = useState<string>('');
   const [validationTimeout, setValidationTimeout] = useState<string>('');
@@ -218,10 +219,11 @@ function DispatchSettingsSection({
 
       <div className="space-y-3">
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${fieldId}-parallel`} className="block text-xs font-medium text-secondary mb-1">
             Max parallel workers
           </label>
           <input
+            id={`${fieldId}-parallel`}
             type="number"
             min={1}
             value={parallel}
@@ -235,10 +237,11 @@ function DispatchSettingsSection({
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${fieldId}-validation-timeout`} className="block text-xs font-medium text-secondary mb-1">
             Validation command timeout (seconds)
           </label>
           <input
+            id={`${fieldId}-validation-timeout`}
             type="number"
             min={1}
             value={validationTimeout}
@@ -261,10 +264,11 @@ function DispatchSettingsSection({
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${fieldId}-autonomy`} className="block text-xs font-medium text-secondary mb-1">
             Manager wake autonomy
           </label>
           <select
+            id={`${fieldId}-autonomy`}
             value={autonomy}
             onChange={(e) => setAutonomy(e.target.value as WakeAutonomyValue)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -307,7 +311,7 @@ function DispatchSettingsSection({
       <button
         onClick={handleSave}
         disabled={saving || validationTimeoutError != null}
-        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="mt-3 btn-primary"
       >
         {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         {saving ? 'Saving…' : 'Save dispatch settings'}
@@ -1001,7 +1005,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, effective,
               type="button"
               onClick={add}
               disabled={!selectedBackend || pending !== null}
-              className="px-2 py-1 bg-accent text-white rounded text-xs font-medium disabled:opacity-50"
+              className="px-2 py-1 bg-accent-fill text-white rounded text-xs font-medium disabled:opacity-50"
             >
               {single ? 'Set reviewer' : 'Add'}
             </button>

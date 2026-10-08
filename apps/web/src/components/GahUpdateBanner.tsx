@@ -109,7 +109,7 @@ export function GahUpdateBanner() {
           type="button"
           onClick={() => void restartToUpdate()}
           disabled={starting}
-          className="inline-flex items-center gap-1.5 rounded bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded bg-accent-fill px-2 py-1 text-xs font-medium text-white hover:bg-accent-fill/90 disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Restart to update'}
         </button>

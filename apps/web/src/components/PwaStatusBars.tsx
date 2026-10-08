@@ -40,7 +40,7 @@ export function PwaStatusBars() {
               setUpdateApply(null);
               updateApply();
             }}
-            className="inline-flex items-center gap-1.5 px-2 py-1 bg-accent text-white rounded text-xs font-medium hover:bg-accent/90"
+            className="inline-flex items-center gap-1.5 px-2 py-1 bg-accent-fill text-white rounded text-xs font-medium hover:bg-accent-fill/90"
           >
             <RefreshCw size={12} aria-hidden="true" />
             Reload to update

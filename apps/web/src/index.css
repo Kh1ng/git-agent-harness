@@ -22,7 +22,7 @@
   --status-critical: 245 115 115;
   --status-unknown: 145 143 137; /* same as ink-muted: neutral, not alarming */
 
-  --accent-fill: 30 98 180;
+  --accent-fill: 30 98 180;      /* fill behind white text (6.07:1); not overridden per theme, both rely on it */
   --accent: 80 155 245;
 
   /* Categorical series order is fixed -- never reassigned per filter. */
