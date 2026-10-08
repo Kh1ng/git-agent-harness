@@ -807,6 +807,28 @@ export function BackendInstancesCard({ profileName, effective }: { profileName: 
   );
 }
 
+/** The routing lists on their own: which agents take each kind of job, in order. */
+export function AgentPoolSection({ profileName, effective, onRefresh }: {
+  profileName: string;
+  effective: SettingsConfigProfileSummary;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="card-padded" aria-labelledby="agent-pool-title">
+      <h3 id="agent-pool-title" className="text-sm font-semibold text-primary mb-1">Agent pool</h3>
+      <p className="text-xs text-muted mb-3">
+        Which agents take each kind of job, tried from the top. Pick an account or a default login and give the exact
+        model name: for Antigravity the model is a name from <code>agy models</code>.
+      </p>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <EditableCandidateList title="Coding" listKey="improve" profile={profileName} candidates={effective.improve_candidates} effective={effective} onMutate={onRefresh} />
+        <EditableCandidateList title="Review" listKey="review" profile={profileName} candidates={effective.review_candidates} effective={effective} onMutate={onRefresh} />
+        <EditableCandidateList title="Planning" listKey="pm" profile={profileName} candidates={effective.pm_candidates} effective={effective} onMutate={onRefresh} />
+      </div>
+    </section>
+  );
+}
+
 const ROUTING_LISTS = ['pm', 'improve', 'review', 'escalatory', 'routine'] as const;
 type RoutingListKey = (typeof ROUTING_LISTS)[number];
 

@@ -34,6 +34,18 @@ function pinFakeGah(body: string): () => void {
   };
 }
 
+test('manual worker and per-launch reasoning reach the actual dispatch CLI argv', async () => {
+  const restore = pinFakeGah('printf "%s\\n" "$@"');
+  const lines: string[] = [];
+  try {
+    const result = await runDispatchCancellable({ profile: 'repo', mode: 'improve', backend: 'codex', model: 'gpt-6.1-sol', target: 'ticket.md', manualWorker: true, reasoningEffort: 'high' }, (line) => lines.push(line)).promise;
+    assert.equal(result.exitCode, 0);
+    assert.ok(lines.includes('--manual-worker'));
+    const effortFlag = lines.indexOf('--reasoning-effort');
+    assert.equal(lines[effortFlag + 1], 'high');
+  } finally { restore(); }
+});
+
 test('read commands reject with the exit code and stderr when gah fails', async () => {
   const restore = pinFakeGah('echo "quota exploded" >&2\nexit 3');
   try {
@@ -240,12 +252,20 @@ test('profile set args carry worker scaling, a boost, and their clear keys', () 
       boost_workers: 2,
       boost_model: 'codex/gpt-5',
       boost_hours: 1.5,
+      agent_model: ['claude/sonnet=opus'],
+      max_concurrent: ['codex/gpt-5=3', 'agy/Gemini 3.1 Pro (High)=1'],
       clear: ['worker_boost', 'worker_scaling_max_workers'],
     }),
     [
       'profile',
       'set',
       'api-worker',
+      '--agent-model',
+      'claude/sonnet=opus',
+      '--max-concurrent',
+      'codex/gpt-5=3',
+      '--max-concurrent',
+      'agy/Gemini 3.1 Pro (High)=1',
       '--worker-scaling',
       'on',
       '--worker-scaling-max-workers',
@@ -266,6 +286,11 @@ test('profile set args carry worker scaling, a boost, and their clear keys', () 
       'worker_scaling_max_workers',
     ],
   );
+});
+
+test('profile set forwards native worker reasoning independently of model switches', () => {
+  assert.deepEqual(buildProfileSetArgs({ name: 'repo', agent_effort: ['codex=high', 'claude=default'] }),
+    ['profile', 'set', 'repo', '--agent-effort', 'codex=high', '--agent-effort', 'claude=default']);
 });
 
 test('profile set emits validation timeout clear exactly once', () => {

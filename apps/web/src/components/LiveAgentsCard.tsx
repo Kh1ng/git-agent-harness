@@ -56,6 +56,8 @@ const DOT: Record<LiveState, { className: string; pulse: boolean; label: string 
   down: { className: 'bg-critical', pulse: false, label: 'down' }
 };
 const LEDGER_REFRESH_MS = 60 * 1000;
+/** A job the loop has claimed but not yet routed to an agent. */
+const UNASSIGNED = 'Choosing an agent';
 const GATE_MODES = new Set(['review', 'validate', 'validation', 'merge', 'routine_review']);
 
 /** `codex` → `Codex`: agent and model names lead with a capital. */
@@ -143,6 +145,20 @@ interface LiveJob {
   model: string | null;
   action: string | null;
   runId: string | null;
+  /** The loop recorded the agent on the job's claim; nothing needs inferring. */
+  routed: boolean;
+}
+
+/** A job's agent from its claim's route when the loop recorded one, else
+ * from its latest ledger entry, which may be an earlier attempt's. */
+function jobAgent(route: ActiveClaim['route'], ledger: LedgerEntry | null | undefined): Pick<LiveJob, 'backend' | 'model' | 'routed'> {
+  if (route) return { backend: route.backend, model: route.model ?? null, routed: true };
+  return { backend: ledger?.effective_backend ?? ledger?.backend ?? null, model: ledger?.effective_model ?? null, routed: false };
+}
+
+/** "Codex · gpt-5 on #12": the subscription, the exact model, the job. */
+export function liveRowTitle(row: Pick<LiveAgentRow, 'name' | 'model' | 'job'>): string {
+  return `${agentDisplayName(row.name)}${row.model ? ` · ${row.model}` : ''} on ${row.job ?? 'a job'}`;
 }
 
 function sessionBackend(session: Session): string | null {
@@ -175,7 +191,7 @@ export function buildLiveRows(input: {
         // ponytail: jobs match accounts on backend only, since a session's instanceId is the
         // dashboard's provider slot (`codex_instance_0`), not a backend instance. With two
         // accounts on one backend the first takes the job; match on account once sessions carry it.
-        backend: sessionBackend(session), model: session.model ?? null, action: null, runId: null });
+        backend: sessionBackend(session), model: session.model ?? null, action: null, runId: null, routed: true });
     }
     for (const run of input.controllerRuns) {
       if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
@@ -183,22 +199,23 @@ export function buildLiveRows(input: {
       const ledger = run.work_id ? input.ledgers[run.work_id] : null;
       const [mode] = run.action.split(':');
       jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
-        backend: ledger?.effective_backend ?? ledger?.backend ?? null, model: ledger?.effective_model ?? null, action: run.action, runId: run.run_id });
+        ...jobAgent(input.claims.find((claim) => claim.work_id === run.work_id)?.route, ledger), action: run.action, runId: run.run_id });
     }
     for (const claim of input.claims) {
       if (covered.has(claim.work_id)) continue;
       covered.add(claim.work_id);
       const ledger = input.ledgers[claim.work_id];
-      jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? claim.scope, since: claim.claimed_at,
-        backend: ledger?.effective_backend ?? ledger?.backend ?? null, model: ledger?.effective_model ?? null, action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
+      jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? null, since: claim.claimed_at,
+        ...jobAgent(claim.route, ledger), action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
     }
     // Pair loop jobs with the factory's agent processes, oldest with oldest: the
     // loop starts a job's agent right after it claims the work. With one process
     // per job the process is the truth (a ledger entry is from an earlier
     // attempt); otherwise only jobs that name no backend are filled in.
     const processes = [...(input.factoryAgents ?? [])].sort((a, b) => (a.started_at ?? '').localeCompare(b.started_at ?? ''));
-    const loopJobs = jobs.filter((job) => !job.key.startsWith('session:')).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
-    const exact = processes.length === loopJobs.length;
+    // A loop that records routes needs no pairing, and its processes would be paired with the wrong jobs.
+    const loopJobs = jobs.some((job) => job.routed && !job.key.startsWith('session:')) ? [] : jobs.filter((job) => !job.key.startsWith('session:')).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
+    const exact = loopJobs.length > 0 && processes.length === loopJobs.length;
     (exact ? loopJobs : loopJobs.filter((job) => !job.backend)).forEach((job, index) => {
       const agent = processes[index];
       if (!agent) return;
@@ -206,7 +223,7 @@ export function buildLiveRows(input: {
       job.model = agent.model ?? (exact ? null : job.model);
     });
   } else {
-    jobs.push(...input.workers.map(worker => ({ stale: worker.state === 'stale', instance: worker.backend_instance, key: `${worker.node_id}:${worker.run_id}:${worker.attempt}`, workId: worker.work_id, mode: worker.mode, since: worker.started_at, backend: worker.backend, model: worker.model, action: null, runId: worker.run_id })));
+    jobs.push(...input.workers.map(worker => ({ routed: true, stale: worker.state === 'stale', instance: worker.backend_instance, key: `${worker.node_id}:${worker.run_id}:${worker.attempt}`, workId: worker.work_id, mode: worker.mode, since: worker.started_at, backend: worker.backend, model: worker.model, action: null, runId: worker.run_id })));
   }
   const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
   const state = (job: LiveJob): LiveState => job.stale ? 'stale' : (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
@@ -238,7 +255,7 @@ export function buildLiveRows(input: {
     const account = input.accounts.find((candidate) => candidate.backend === job.backend);
     rows.push({
       key: job.key,
-      name: account?.name ?? job.backend ?? 'controller',
+      name: account?.name ?? job.backend ?? UNASSIGNED,
       detail: account ? account.backend : job.action ?? job.backend,
       provider: account?.provider ?? null,
       model: input.workers === undefined ? job.model ?? account?.model ?? null : job.model,
@@ -278,11 +295,11 @@ function LiveRow({ row, now, ledger, onWatch }: { row: LiveAgentRow; now: number
     ledger?.timestamp ? `last attempt ${formatDuration(now - Date.parse(ledger.timestamp))} ago` : null
   ].filter(Boolean).join(' · ') : '';
   return (
-    <li className="grid grid-cols-[12px_minmax(5rem,10rem)_minmax(0,1fr)] items-start gap-3 py-2" data-live-state={row.state}>
+    <li className="grid grid-cols-[12px_minmax(8rem,16rem)_minmax(0,1fr)] items-start gap-3 py-2" data-live-state={row.state}>
       <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${dot.className} ${dot.pulse ? 'motion-safe:animate-pulse' : ''}`} role="img" aria-label={dot.label} />
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-primary" title={[row.name, row.model].filter(Boolean).join(' ')}>
-          {agentDisplayName(row.name)}{row.model && <span className="font-normal text-secondary"> {modelDisplayName(row.detail ?? row.name, row.model)}</span>}
+          {agentDisplayName(row.name)}{row.model && <span className="font-normal text-secondary"> · {row.model}</span>}
         </p>
         {row.detail && row.detail !== row.name && <p className="truncate text-[11px] text-muted" title={row.detail}>{row.detail}</p>}
       </div>

@@ -2,6 +2,10 @@ import { expect, test } from '@playwright/test';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
+// Profile saves refresh intercepted reads; dispose of routes before the page
+// closes so a response in flight cannot fail this or the following test.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
 test('the Profile sidebar exposes validation timeout and persists profile updates in the shared mock', async ({ page, request }) => {
   test.setTimeout(120_000);
   await request.post(`${MOCK_BASE_URL}/api/mock/reset`);
@@ -107,7 +111,7 @@ test('the routing editor sets the routine reviewer from an account picker', asyn
 
   await page.getByRole('button', { name: 'Set reviewer' }).click();
   await page.getByLabel('Account').selectOption('backend:opencode');
-  await page.getByLabel('Model').fill('tak-mistral-vibe/zai-glm-5-3');
+  await page.getByLabel('Model', { exact: true }).fill('tak-mistral-vibe/zai-glm-5-3');
   await page.getByRole('button', { name: 'Set reviewer' }).click();
 
   await expect.poll(() => calls.length).toBe(1);
@@ -160,7 +164,7 @@ test('the routing editor sends the named account, and remove and reorder name th
 
   await page.getByRole('button', { name: '+ Add candidate' }).first().click();
   await page.getByLabel('Account').selectOption('instance:tak-vibe');
-  await page.getByLabel('Model').fill('zai-glm-5-3');
+  await page.getByLabel('Model', { exact: true }).fill('zai-glm-5-3');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect.poll(() => calls.length).toBe(3);
   expect(calls[2]).toMatchObject({

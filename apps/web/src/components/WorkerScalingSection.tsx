@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { Loader2, Save, Zap, X } from 'lucide-react';
 import { useGahStore } from '../store/gahStore.js';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
+import { agentLabel } from './AgentLimitsSection.js';
 
 interface WorkerScalingSectionProps {
   selectedName: string;
   selected: Pick<ProfileSummary, 'max_parallel_workers' | 'worker_scaling'>;
+  /** Every `backend/model` in the profile's routing; the boost offers them as a list. */
+  agents?: string[];
 }
 
-const INPUT_CLASS = 'w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary';
-const BUTTON_CLASS = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed';
+const INPUT_CLASS = 'min-h-11 w-full bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary';
+const BUTTON_CLASS = 'inline-flex min-h-11 items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed';
 
 /** A whole number at or above `min`, or undefined for blank or invalid text. */
 function wholeNumber(text: string, min: number): number | undefined {
@@ -22,7 +25,7 @@ function wholeNumber(text: string, min: number): number | undefined {
  * subscription has quota headroom, and a manual boost. Both are saved to the
  * profile and picked up by the loop on its next iteration.
  */
-export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSectionProps) {
+export function WorkerScalingSection({ selectedName, selected, agents }: WorkerScalingSectionProps) {
   const updateProfile = useGahStore((s) => s.updateProfile);
   const saving = useGahStore((s) => s.profileCrud.updating);
   const saveError = useGahStore((s) => s.profileCrud.updateError);
@@ -39,6 +42,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
   const [boostWorkers, setBoostWorkers] = useState('1');
   const [boostModel, setBoostModel] = useState('');
   const [boostHours, setBoostHours] = useState('');
+  const [feedback, setFeedback] = useState<string | null>(null);
   // Seed once per profile so a refresh after saving keeps in-progress edits.
   const seededProfileRef = useRef<string | null>(null);
 
@@ -49,6 +53,10 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
     setMaxWorkers(scaling?.max_workers != null ? String(scaling.max_workers) : '');
     setExtraPerModel(String(scaling?.extra_per_model ?? 1));
     setMinRemaining(String(scaling?.min_remaining_percent ?? 50));
+    setBoostWorkers('1');
+    setBoostModel('');
+    setBoostHours('');
+    setFeedback(null);
   }, [selectedName, scaling]);
 
   useEffect(() => {
@@ -57,7 +65,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
 
   if (!scaling) {
     return (
-      <section className="card-padded max-w-md">
+      <section className="card-padded">
         <h3 className="text-sm font-semibold text-primary mb-1">Worker scaling</h3>
         <p className="text-xs text-muted">This node's <code>gah</code> does not support worker scaling yet. Update it to use these settings.</p>
       </section>
@@ -79,12 +87,15 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
   const boostHoursValue = Number(boostHours);
   const boostError = boostWorkersValue === undefined
     ? 'Workers to add must be a whole number of at least 1.'
-    : boostHours.trim() !== '' && !(boostHoursValue > 0)
+    : boostHours.trim() !== '' && (!Number.isFinite(boostHoursValue) || !(boostHoursValue > 0))
       ? 'Hours must be greater than zero.'
       : null;
 
-  const save = async (data: Parameters<typeof updateProfile>[1]) => {
+  const save = async (data: Parameters<typeof updateProfile>[1], message: string) => {
+    setFeedback(null);
     await updateProfile(selectedName, data);
+    if (useGahStore.getState().profileCrud.updateError) return;
+    setFeedback(message);
     await fetchStatus(selectedName, { force: true });
   };
   const saveScaling = () => save({
@@ -94,19 +105,20 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
     ...(maxWorkersValue !== undefined
       ? { worker_scaling_max_workers: maxWorkersValue }
       : { clear: ['worker_scaling_max_workers'] }),
-  });
+  }, 'Automatic scaling settings saved. They apply on the next loop cycle.');
   const startBoost = () => save({
     boost_workers: boostWorkersValue,
     ...(boostModel.trim() ? { boost_model: boostModel.trim() } : {}),
     ...(boostHours.trim() ? { boost_hours: boostHoursValue } : {}),
-  });
-  const endBoost = () => save({ clear: ['worker_boost'] });
+  }, `Added capacity for ${boostWorkersValue} extra worker${boostWorkersValue === 1 ? '' : 's'}. Queued jobs can start on the next loop cycle.`);
+  const endBoost = () => save({ clear: ['worker_boost'] }, 'Extra capacity removed. Running jobs will finish normally.');
 
-  const boostActive = (scaling.boost_workers ?? 0) > 0;
+  const boostActive = (scaling.boost_workers ?? 0) > 0
+    && (!scaling.boost_until || Date.parse(scaling.boost_until) > Date.now());
 
   return (
-    <section className="card-padded max-w-md">
-      <h3 className="text-sm font-semibold text-primary mb-1">Worker scaling</h3>
+    <section className="card-padded">
+      <h3 className="text-sm font-semibold text-primary mb-1">Extra worker capacity</h3>
       <p className="text-xs text-muted mb-3">
         Workers beyond the baseline of <span className="font-mono text-secondary">{baseline}</span> for{' '}
         <span className="font-mono text-secondary">{selectedName}</span>. Free memory and CPU still decide
@@ -116,7 +128,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
       {limits && (
         <div className="mb-3 rounded-md border border-subtle bg-raised px-3 py-2" role="status">
           <p className="text-sm text-primary">
-            Now: <span className="font-semibold">{limits.workers}</span> workers
+            Current capacity: <span className="font-semibold">{limits.workers}</span> workers
             {limits.workers !== limits.baseline_workers && <> (baseline {limits.baseline_workers})</>}
           </p>
           {limits.notes?.map((note) => (
@@ -125,7 +137,9 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
         </div>
       )}
 
-      <div className="space-y-3">
+      <details className="rounded-lg border border-subtle p-3">
+      <summary className="cursor-pointer text-sm font-medium text-primary">Automatic scaling {enabled ? '(on)' : '(off)'}</summary>
+      <div className="mt-3 space-y-3">
         <label className="flex items-start gap-2 text-sm text-primary">
           <input type="checkbox" className="mt-0.5" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           <span>
@@ -158,18 +172,20 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
         Save scaling settings
       </button>
 
-      <h4 className="text-sm font-semibold text-primary mt-5 mb-1">Add workers now</h4>
+      </details>
+      <h4 className="text-sm font-semibold text-primary mt-5 mb-1">Add extra capacity</h4>
+      <p className="mb-3 text-xs text-muted">Allow more queued jobs to run in parallel. The loop must be running with eligible work and enough free CPU and memory. This does not create a job.</p>
       {boostActive ? (
         <div className="flex items-center justify-between gap-2 rounded-md border border-subtle bg-raised px-3 py-2">
           <p className="text-sm text-primary">
-            +{scaling.boost_workers} for {scaling.boost_model ?? 'every capped agent'}
+            +{scaling.boost_workers} worker capacity · {scaling.boost_model ? agentLabel(scaling.boost_model) : 'All models'}
             <span className="block text-xs text-muted">
               {scaling.boost_until ? `Until ${new Date(scaling.boost_until).toLocaleString()}` : 'Until you end it'}
             </span>
           </p>
           <button onClick={endBoost} disabled={saving} className={`bg-raised border border-subtle text-secondary hover:bg-white/5 ${BUTTON_CLASS}`}>
             <X size={14} aria-hidden="true" />
-            End boost
+            Remove extra capacity
           </button>
         </div>
       ) : (
@@ -180,27 +196,32 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
               <input id="worker-boost-count" type="number" min={1} value={boostWorkers} onChange={(e) => setBoostWorkers(e.target.value)} className={INPUT_CLASS} />
             </div>
             <div>
-              <label htmlFor="worker-boost-hours" className="block text-xs font-medium text-secondary mb-1">For how many hours</label>
+              <label htmlFor="worker-boost-hours" className="block text-xs font-medium text-secondary mb-1">Duration in hours (optional)</label>
               <input id="worker-boost-hours" type="number" min={0} step="any" value={boostHours} onChange={(e) => setBoostHours(e.target.value)} placeholder="Until ended" className={INPUT_CLASS} />
             </div>
           </div>
           <div className="mt-3">
-            <label htmlFor="worker-boost-model" className="block text-xs font-medium text-secondary mb-1">Agent</label>
-            <input id="worker-boost-model" type="text" value={boostModel} onChange={(e) => setBoostModel(e.target.value)} placeholder="Every capped agent" className={INPUT_CLASS} />
-            <p className="text-xs text-muted mt-1">
-              Written as <code>backend/model</code>, for example <code>codex/gpt-5</code>. A boost is not
-              limited by the scaled maximum above.
-            </p>
+            <label htmlFor="worker-boost-model" className="block text-xs font-medium text-secondary mb-1">Model to give extra capacity</label>
+            {agents?.length ? (
+              <select id="worker-boost-model" value={boostModel} onChange={(e) => setBoostModel(e.target.value)} className={INPUT_CLASS}>
+                <option value="">All models</option>
+                {agents.map((agent) => <option key={agent} value={agent}>{agentLabel(agent)}</option>)}
+              </select>
+            ) : (
+              <input id="worker-boost-model" type="text" value={boostModel} onChange={(e) => setBoostModel(e.target.value)} placeholder="Every capped agent" className={INPUT_CLASS} />
+            )}
+            <p className="text-xs text-muted mt-1">Adds {boostWorkersValue ?? '…'} to total capacity{boostModel ? ' and this model’s limit' : ' and each model’s limit'}. Models without individual limits already share all available capacity. Blank duration keeps it active until removed.</p>
           </div>
           {boostError && <p role="alert" className="mt-3 text-xs text-critical">{boostError}</p>}
           <button onClick={startBoost} disabled={saving || boostError != null} className="mt-3 btn-primary">
             <Zap size={14} aria-hidden="true" />
-            Add workers
+            {saving ? 'Saving…' : 'Add worker capacity'}
           </button>
         </>
       )}
 
-      {saveError && <p className="mt-3 text-xs text-critical">Failed to save: {saveError}</p>}
+      {feedback && !saveError && <p role="status" className="mt-3 text-sm text-good">{feedback}</p>}
+      {saveError && <p role="alert" className="mt-3 text-xs text-critical">Failed to save: {saveError}</p>}
     </section>
   );
 }

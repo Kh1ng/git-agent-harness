@@ -493,6 +493,8 @@ export interface DispatchOptions {
   prod?: boolean;
   allowUnknownRedBaseline?: boolean;
   escalate?: boolean;
+  manualWorker?: boolean;
+  reasoningEffort?: string;
 }
 
 export interface DispatchResult {
@@ -512,6 +514,8 @@ export interface CancellableDispatch {
 
 function buildDispatchArgs(options: DispatchOptions): string[] {
   const args = ['dispatch', '--profile', options.profile, '--mode', options.mode];
+  if (options.manualWorker) args.push('--manual-worker');
+  if (options.reasoningEffort) args.push('--reasoning-effort', options.reasoningEffort);
 
   if (options.backend) {
     args.push('--backend', options.backend);
@@ -983,12 +987,19 @@ export interface ProfileSetOptions {
   boost_hours?: number | null;
   /** Hold approved schema/API contract changes for human review (#1405). */
   hold_contract_changes?: boolean | null;
+  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
+  agent_model?: string[];
+  /** Native reasoning setting per backend, each backend=effort. */
+  agent_effort?: string[];
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
   clear?: string[];
   config?: string;
 }
 
 export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   const args = ['profile', 'set', options.name];
+  for (const setting of options.agent_effort ?? []) args.push('--agent-effort', setting);
   
   if (options.display_name) {
     args.push('--display-name', options.display_name);
@@ -1083,6 +1094,8 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
+  for (const change of options.agent_model ?? []) args.push('--agent-model', change);
+  for (const cap of options.max_concurrent ?? []) args.push('--max-concurrent', cap);
   const scalingFlags = [
     ['--worker-scaling', options.worker_scaling],
     ['--worker-scaling-max-workers', options.worker_scaling_max_workers],

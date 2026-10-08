@@ -17,8 +17,7 @@ import {
   FolderCog,
   CircleDot,
   Bot,
-  ChevronDown
-} from 'lucide-react';
+  ChevronDown, Users } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { RepoLinksMenu } from './RepoLinksMenu.js';
 import type { MainPage, Page, SideView } from '../lib/navigationState.js';
@@ -49,6 +48,7 @@ export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
  * first page and lists the rest as tabs above the page. */
 const mainItems: NavGroup[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'agentpool', label: 'Agents', icon: Users },
   { id: 'work', label: 'Factory', icon: ListChecks },
   { id: 'kanban', label: 'Kanban', icon: KanbanSquare },
   { id: 'git', label: 'Projects', icon: FolderGit2, tabs: [

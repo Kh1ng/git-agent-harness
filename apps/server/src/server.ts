@@ -1603,6 +1603,8 @@ export function createServer(
       prod: body.prod === true,
       allowUnknownRedBaseline: body.allowUnknownRedBaseline === true,
       escalate: body.escalate === true,
+      manualWorker: body.manualWorker === true,
+      reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : undefined,
       requestId: typeof body.requestId === 'string' ? body.requestId : undefined,
       nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
       coordinatorNodeId: typeof body.coordinatorNodeId === 'string' ? body.coordinatorNodeId : undefined

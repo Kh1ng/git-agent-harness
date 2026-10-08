@@ -302,6 +302,9 @@ pub struct ActiveClaimSnapshot {
     pub hostname: String,
     pub claimed_at: String,
     pub age_seconds: u64,
+    /// The agent running the job, once routing has picked one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<crate::work_claim::ClaimRoute>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
@@ -776,6 +779,7 @@ fn build_snapshot_inner(
                     hostname: claim.hostname,
                     claimed_at: claim.claimed_at.to_rfc3339(),
                     age_seconds,
+                    route: claim.route,
                 });
             }
         }

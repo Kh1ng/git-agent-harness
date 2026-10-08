@@ -1057,7 +1057,7 @@ fn run_parallel_once(
         .filter(|result| parallel_outcome_is_failure(&result.outcome))
         .collect();
     if !failed_results.is_empty() {
-        crate::work_claim::release_all_for_profile(&claim_scope)?;
+        crate::work_claim::release_owned_for_profile(&claim_scope)?;
         anyhow::bail!(
             "{} parallel action(s) failed; first failure: {}",
             failed_results.len(),

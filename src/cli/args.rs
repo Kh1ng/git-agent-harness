@@ -415,6 +415,13 @@ pub enum Commands {
         /// genuine `VALIDATION GATE FAILED` error.
         #[arg(long, default_value_t = false)]
         skip_validation_gate: bool,
+        /// Start one explicit job alongside the loop, outside automatic worker
+        /// limits. Node CPU/memory admission, work claims and route policy still apply.
+        #[arg(long)]
+        manual_worker: bool,
+        /// Native reasoning for this launch only; does not edit the saved profile.
+        #[arg(long, requires = "manual_worker")]
+        reasoning_effort: Option<String>,
         /// Enforce scope and verification commands from a local Markdown job file.
         #[arg(long, default_value_t = false)]
         enforce_job_file: bool,
@@ -796,6 +803,8 @@ pub enum PromptPolicyCommands {
     },
 }
 
+// Clap derives the flat profile flags directly; this command is parsed once.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ProfileCommands {
     /// List all profiles in config
@@ -1012,6 +1021,18 @@ pub enum ProfileCommands {
         /// Hold approved schema/API contract changes for human review.
         #[arg(long)]
         hold_contract_changes: Option<bool>,
+        /// Switch a backend's model in every routing list: `backend/old=new`.
+        /// The old model's concurrency cap and boost move with it. Repeatable.
+        #[arg(long)]
+        agent_model: Vec<String>,
+        /// Set native reasoning for a backend: backend=effort.
+        #[arg(long)]
+        agent_effort: Vec<String>,
+        /// Cap one model's concurrent runs: `backend/model=count`, or remove
+        /// its cap with a count of 0. Repeat for several models;
+        /// `--clear max_concurrent_per_model` removes every cap.
+        #[arg(long)]
+        max_concurrent: Vec<String>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,

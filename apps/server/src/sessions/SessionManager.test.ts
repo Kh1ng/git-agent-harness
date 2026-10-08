@@ -4,6 +4,27 @@ import { test } from 'node:test';
 import type { ServerMessage, Session } from '@git-agent-harness/contracts';
 import { createSessionManager } from './SessionManager.js';
 
+test('explicit manual workers launch alongside an active same-profile session and retain their reasoning', async () => {
+  const dispatched: { manualWorker?: boolean; reasoningEffort?: string; target?: string }[] = [];
+  const manager = createSessionManager({
+    disableCleanupTimer: true,
+    providerRegistry: { isProviderAvailable: () => true },
+    pushBus: { publish() {} },
+    dispatchRunner: (options) => {
+      dispatched.push(options);
+      return { promise: new Promise(() => {}), cancel: async () => ({ cancelled: true }) };
+    },
+  });
+  const base = { profile: 'repo', providerKind: 'github' as const, instanceId: 'github-0', repo: 'owner/repo', mode: 'improve' };
+  await manager.startSession({ ...base, target: 'first.md' });
+  await new Promise((resolve) => setImmediate(resolve));
+  await manager.startSession({ ...base, target: 'second.md', manualWorker: true, reasoningEffort: 'high', backend: 'codex', model: 'gpt-6.1-sol' });
+  assert.equal(dispatched.length, 2);
+  assert.equal(dispatched[1].manualWorker, true);
+  assert.equal(dispatched[1].reasoningEffort, 'high');
+  assert.equal(dispatched[1].target, 'second.md');
+});
+
 test('explicit review and improve routes reach dispatch unchanged and do not fall back on failure', async () => {
   for (const mode of ['review', 'improve']) {
     const dispatched: Array<{ mode: string; backend?: string; model?: string }> = [];

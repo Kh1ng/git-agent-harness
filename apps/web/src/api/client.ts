@@ -1,3 +1,4 @@
+import type { Session } from '@git-agent-harness/contracts';
 import { coordinatorToken } from './coordinatorToken.js';
 import type { ActivityEvent, ActivityNotificationPreferences, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview, PairingAccessRequest } from '@git-agent-harness/contracts';
 import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettings, PlanningTarget } from '@git-agent-harness/contracts';
@@ -250,6 +251,12 @@ export interface ProfileUpdateData {
   boost_hours?: number;
   /** Hold approved schema/API contract changes for human review (#1405). */
   hold_contract_changes?: boolean;
+  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
+  agent_model?: string[];
+  /** Native reasoning setting per backend, each backend=effort. */
+  agent_effort?: string[];
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
   clear?: string[];
 }
 
@@ -312,6 +319,7 @@ export interface GahDataSource {
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
   getLoopDecision(profile: string): Promise<LoopDecision | null>;
   getProfiles(): Promise<ProfileSummary[]>;
+  startWorker(params: { profile: string; providerKind: string; repo: string; backend: string; model: string; target: string; reasoningEffort?: string; requestId: string }): Promise<{ session: Session }>;
   getProjects(): Promise<ProjectSummary[]>;
   addProject(profile: string): Promise<ProjectSummary>;
   removeProject(profile: string, nodeId?: string): Promise<{ removed: boolean }>;
@@ -497,6 +505,9 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
 }
 
 export const gahApi: GahDataSource = {
+  startWorker(params) {
+    return postJson<{ session: Session }, Record<string, unknown>>('/api/dispatch', { ...params, instanceId: params.providerKind + '-0', mode: 'improve', manualWorker: true });
+  },
   getCoordinatorInfo() {
     return getJson<CoordinatorInfo>('/api/info');
   },

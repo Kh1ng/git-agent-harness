@@ -210,9 +210,13 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             boost_model,
             boost_hours,
             hold_contract_changes,
+            agent_model,
+            agent_effort,
+            max_concurrent,
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
+            let defaults = cfg.defaults.clone();
             let existing = config::get_profile_mut(&mut cfg, &name)?;
 
             // Helper to clear a field if requested
@@ -447,6 +451,27 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
                 existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
             }
+            for setting in &agent_effort {
+                let (backend, effort) = setting
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("expected backend=effort"))?;
+                existing.set_agent_effort(backend, effort)?;
+            }
+            for switch in &agent_model {
+                let (backend, from, to) = parse_model_switch(switch)?;
+                super::routing_candidates::switch_model(&defaults, existing, backend, from, to)?;
+            }
+            if should_clear("max_concurrent_per_model", &clear) {
+                existing.max_concurrent_per_model.clear();
+            }
+            for cap in &max_concurrent {
+                let (model, count) = parse_model_cap(cap)?;
+                if count == 0 {
+                    existing.max_concurrent_per_model.remove(&model);
+                } else {
+                    existing.max_concurrent_per_model.insert(model, count);
+                }
+            }
 
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated profile '{}'", name);
@@ -487,4 +512,30 @@ fn boost_expiry(hours: f64) -> Result<String> {
     Ok(until
         .replace_nanosecond(0)?
         .format(&time::format_description::well_known::Rfc3339)?)
+}
+
+/// `backend/model=count`, where a count of 0 removes that model's cap. The
+/// model may itself contain `=` or spaces, so the count is whatever follows
+/// the last `=`.
+fn parse_model_cap(value: &str) -> Result<(String, u32)> {
+    let parsed = value.rsplit_once('=').and_then(|(model, count)| {
+        let count = count.trim().parse::<u32>().ok()?;
+        let model = model.trim();
+        (model.contains('/') && !model.starts_with('/')).then(|| (model.to_string(), count))
+    });
+    parsed.ok_or_else(|| {
+        anyhow::anyhow!("invalid max_concurrent '{value}' (expected backend/model=count)")
+    })
+}
+
+/// `backend/old=new`. The backend ends at the first `/`; a model may itself
+/// contain `/`, so the new model is whatever follows the last `=`.
+fn parse_model_switch(value: &str) -> Result<(&str, &str, &str)> {
+    let parsed = value.split_once('/').and_then(|(backend, models)| {
+        let (from, to) = models.rsplit_once('=')?;
+        let parts = (backend.trim(), from.trim(), to.trim());
+        (!parts.0.is_empty() && !parts.1.is_empty() && !parts.2.is_empty()).then_some(parts)
+    });
+    parsed
+        .ok_or_else(|| anyhow::anyhow!("invalid agent_model '{value}' (expected backend/old=new)"))
 }

@@ -567,6 +567,9 @@ impl ScenarioHarness {
         let mut cmd = self.gah_command();
         cmd.args(["dispatch", "--profile", &self.profile_name]);
         cmd.args(args);
+        if let Some(path) = &self.node_pressure_fixture {
+            cmd.env("GAH_TEST_NODE_PRESSURE_FILE", path);
+        }
         let out = cmd
             .env(
                 "XDG_STATE_HOME",

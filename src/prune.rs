@@ -632,6 +632,7 @@ mod tests {
             hostname: "test".into(),
             claimed_at: "2099-01-01T00:00:00Z".into(),
             age_seconds: 0,
+            route: None,
         }];
 
         let sets = automatic_worktree_sets(&entries, "real", "real", Some(&mrs), Some(&claims));

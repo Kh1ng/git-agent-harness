@@ -349,7 +349,9 @@ class RemoteNodeTransport implements NodeDispatchTransport {
           allowDraftFail: options.allowDraftFail,
           prod: options.prod,
           allowUnknownRedBaseline: options.allowUnknownRedBaseline,
-          escalate: options.escalate
+          escalate: options.escalate,
+          manualWorker: options.manualWorker,
+          reasoningEffort: options.reasoningEffort
         })
       );
       setTimeout(() => {
@@ -991,7 +993,7 @@ export class FleetDispatchCoordinator {
     if (!this.nodeAvailabilityAllows(snapshot, options)) {
       return false;
     }
-    if (!this.nodeHasConcurrencyHeadroom(snapshot, options)) {
+    if (!options.manualWorker && !this.nodeHasConcurrencyHeadroom(snapshot, options)) {
       return false;
     }
     return true;

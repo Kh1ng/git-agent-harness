@@ -58,6 +58,59 @@ impl CandidateList {
     }
 }
 
+impl CandidateList {
+    const ALL: [Self; 4] = [Self::Pm, Self::Improve, Self::Review, Self::Escalatory];
+}
+
+/// Point every candidate of `backend` that runs `from` at `to`, in all four
+/// lists, and carry that model's concurrency cap and boost along so the
+/// agent keeps its limits under its new name. Lists are resolved and written
+/// like every other candidate mutation. Errors when nothing runs `from`.
+pub(crate) fn switch_model(
+    defaults: &config::Defaults,
+    profile: &mut config::Profile,
+    backend: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    let effective = profile.effective_routing(defaults);
+    let mut switched = false;
+    for list in CandidateList::ALL {
+        let mut candidates = list.get(&effective).unwrap_or_default();
+        let matching = candidates.iter_mut().filter(|candidate| {
+            candidate.backend == backend && candidate.model.as_deref() == Some(from)
+        });
+        let mut changed = false;
+        for candidate in matching {
+            candidate.model = Some(to.to_string());
+            changed = true;
+        }
+        if changed {
+            list.set(&mut profile.routing, candidates);
+            switched = true;
+        }
+    }
+    if !switched {
+        bail!("no routing candidate runs {backend}/{from}");
+    }
+    let (old_key, new_key) = (format!("{backend}/{from}"), format!("{backend}/{to}"));
+    if let Some(cap) = profile.max_concurrent_per_model.remove(&old_key) {
+        profile
+            .max_concurrent_per_model
+            .insert(new_key.clone(), cap);
+    }
+    if profile.worker_scaling.boost_model.as_deref() == Some(old_key.as_str()) {
+        profile.worker_scaling.boost_model = Some(new_key);
+    }
+    if let Err(errors) = config::check_profile_backend_instances(defaults, profile) {
+        bail!(
+            "routing candidates invalid after the switch: {}",
+            errors.join("; ")
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_list(raw: &str) -> Result<CandidateList> {
     CandidateList::parse(raw).ok_or_else(|| {
         anyhow::anyhow!("unrecognized list '{raw}' (expected pm|improve|review|escalatory|routine)")

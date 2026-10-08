@@ -2450,6 +2450,13 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     },
     "profile.set": {
       "properties": {
+        "agent_model": {
+          "description": "Model switches for a backend's routing candidates, each backend/old=new.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "agy_path": {
           "description": "Agy executable path on the node.",
           "type": "string"
@@ -2533,6 +2540,13 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
         "manager_wake_autonomy": {
           "description": "Manager wake autonomy level.",
           "type": "string"
+        },
+        "max_concurrent": {
+          "description": "Per-model concurrency caps, each backend/model=count.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "max_parallel_workers": {
           "description": "Maximum concurrent workers.",
