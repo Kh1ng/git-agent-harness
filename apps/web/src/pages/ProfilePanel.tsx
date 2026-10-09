@@ -305,7 +305,7 @@ export function DispatchSettingsSection({
         <p className="mt-3 text-xs text-critical">Failed to save: {saveError}</p>
       )}
       {profileCrud.lastUpdateSuccess && !saveError && (
-        <p className="mt-3 text-xs text-green-600">Dispatch settings saved.</p>
+        <p className="mt-3 text-xs text-good">Dispatch settings saved.</p>
       )}
 
       <button
@@ -1027,7 +1027,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, effective,
               type="button"
               onClick={add}
               disabled={!selectedBackend || pending !== null}
-              className="px-2 py-1 bg-accent-fill text-white rounded text-xs font-medium disabled:opacity-50"
+              className="px-2 py-1 bg-accent-fill text-on-fill rounded text-xs font-medium disabled:opacity-50"
             >
               {single ? 'Set reviewer' : 'Add'}
             </button>

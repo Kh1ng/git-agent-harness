@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/experimental-ct-react';
 import React from 'react';
 import { Navbar } from '../../src/components/Navbar.js';
 import { SessionDetailModal } from '../../src/components/SessionDetailModal.js';
+import { ThemePicker } from '../../src/components/ThemePicker.js';
+import { THEMES } from '../../src/lib/themes.js';
 import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 
 test.use({ hasTouch: true });
@@ -85,15 +87,14 @@ test('session controls stay reachable on small phones, landscape, and desktop', 
   await expect.poll(() => sent.some(message => message.type === 'session.stop' && message.sessionId === session.id)).toBe(true);
 });
 
-test('semantic text and badges retain contrast in explicit and system themes', async ({ mount, page }, testInfo) => {
-  await mount(<div className="bg-card p-4"><p className="text-muted">Last seen</p><button className="btn-primary">Add node</button>{['good', 'warning', 'serious', 'critical'].map((status) => <span key={status} className={`badge badge-${status}`}>{status}</span>)}</div>);
-  for (const theme of ['dark', 'light', 'system']) {
-    await page.emulateMedia({ colorScheme: theme === 'dark' ? 'dark' : 'light' });
-    await page.evaluate((value) => { if (value === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = value; }, theme);
+test('semantic text, badges and filled buttons retain contrast in every theme', async ({ mount, page }, testInfo) => {
+  await mount(<div className="bg-card p-4"><p className="text-primary">Fleet</p><p className="text-secondary">Two nodes</p><p className="text-muted">Last seen</p><button className="btn-primary">Add node</button><button className="btn-danger">Delete</button>{['good', 'warning', 'serious', 'critical'].map((status) => <span key={status} className={`badge badge-${status}`}>{status}</span>)}<div className="bg-raised"><p className="text-muted">Raised</p>{['good', 'warning', 'serious', 'critical'].map((status) => <p key={status} className={`text-${status}`}>{status}</p>)}</div></div>);
+  for (const { id } of THEMES) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, id);
     const ratios = await page.evaluate(() => {
       const rgb = (value: string) => value.match(/[\d.]+/g)!.map(Number);
       const luminance = (color: number[]) => color.slice(0, 3).map((c) => c / 255).map((c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
-      return [...document.querySelectorAll('.text-muted,.btn-primary,.badge')].map((element) => {
+      return [...document.querySelectorAll('p,.btn-primary,.btn-danger,.badge')].map((element) => {
         const style = getComputedStyle(element);
         const background = rgb(style.backgroundColor);
         const parent = rgb(getComputedStyle(element.parentElement!).backgroundColor);
@@ -104,9 +105,21 @@ test('semantic text and badges retain contrast in explicit and system themes', a
         return { text: element.textContent, ratio: (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05) };
       });
     });
-    for (const { text, ratio } of ratios) expect(ratio, `${theme}: ${text}`).toBeGreaterThanOrEqual(4.5);
+    for (const { text, ratio } of ratios) expect(ratio, `${id}: ${text}`).toBeGreaterThanOrEqual(4.5);
+    await page.screenshot({ path: testInfo.outputPath(`gah-audit-${id}-tokens.png`) });
   }
-  await page.screenshot({ path: testInfo.outputPath('gah-audit-light-tokens.png') });
+});
+
+test('the theme picker offers every registered theme and applies the one pressed', async ({ mount, page }) => {
+  await mount(<ThemePicker />);
+  const group = page.getByRole('group', { name: 'Theme' });
+  await expect(group.getByRole('button')).toHaveText(THEMES.map(({ label }) => label));
+  for (const { id, label, scheme } of THEMES) {
+    await group.getByRole('button', { name: label }).click();
+    await expect(group.getByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', id);
+    await expect(page.locator('html')).toHaveAttribute('data-scheme', scheme);
+  }
 });
 
 

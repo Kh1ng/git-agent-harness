@@ -134,11 +134,15 @@ test.describe('desktop content', () => {
     await expect(page.getByRole('heading', { name: 'Node readiness' })).toBeVisible();
   });
 
-  test('theme toggle switches data-theme attribute', async ({ page }) => {
+  test('theme picker switches data-theme and keeps it across reloads', async ({ page }) => {
     await page.goto('/');
     await navigateTo(page, 'Settings', false);
     await page.getByRole('button', { name: 'Light' }).click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await page.getByRole('button', { name: 'Gruvbox' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'gruvbox');
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'gruvbox');
     await page.getByRole('button', { name: 'Dark' }).click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   });

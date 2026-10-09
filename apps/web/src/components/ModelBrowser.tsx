@@ -141,7 +141,7 @@ export function ModelBrowser({
       onClose={onClose}
       aria-label="Browse models"
       onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}
-      className="m-auto w-[calc(100%_-_2rem)] max-w-3xl border-0 bg-transparent p-0 text-primary backdrop:bg-black/60"
+      className="m-auto w-[calc(100%_-_2rem)] max-w-3xl border-0 bg-transparent p-0 text-primary backdrop:bg-scrim/60"
     >
       <div className="card flex max-h-[80dvh] w-full flex-col overflow-hidden">
         <div className="flex items-start justify-between gap-4 px-5 pt-5">
@@ -152,7 +152,7 @@ export function ModelBrowser({
           <button
             type="button"
             onClick={() => dialog.current?.close()}
-            className="touch-target -mr-1.5 -mt-1.5 inline-flex items-center justify-center rounded-md p-1.5 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
+            className="touch-target -mr-1.5 -mt-1.5 inline-flex items-center justify-center rounded-md p-1.5 text-muted hover:bg-overlay/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
             aria-label="Close model browser"
           >
             <X size={16} aria-hidden="true" />
@@ -212,7 +212,7 @@ export function ModelBrowser({
                         current
                           ? 'border-accent/50 bg-accent/10'
                           : enabled
-                            ? 'border-subtle bg-raised hover:border-accent/30 hover:bg-white/5'
+                            ? 'border-subtle bg-raised hover:border-accent/30 hover:bg-overlay/5'
                             : 'border-subtle bg-raised/40 opacity-60'
                       }`}
                     >
@@ -233,10 +233,10 @@ export function ModelBrowser({
                       onClick={() => onToggleFavorite(favorite)}
                       aria-pressed={saved}
                       aria-label={`Favorite ${name} on ${entry.backend.displayName}`}
-                      className="touch-target absolute right-1.5 top-1.5 inline-flex items-center justify-center rounded-md p-1.5 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
+                      className="touch-target absolute right-1.5 top-1.5 inline-flex items-center justify-center rounded-md p-1.5 text-muted hover:bg-overlay/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                       title={saved ? 'Remove from favorites' : 'Add to favorites'}
                     >
-                      <Star size={13} className={saved ? 'fill-amber-400 text-amber-400' : ''} aria-hidden="true" />
+                      <Star size={13} className={saved ? 'fill-warning text-warning' : ''} aria-hidden="true" />
                     </button>}
                   </li>
                 );

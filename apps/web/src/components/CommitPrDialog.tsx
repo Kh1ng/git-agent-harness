@@ -195,7 +195,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged,
 
   return (
     <dialog ref={dialog} onClose={onClose} aria-label="Commit and pull request review"
-      className="card m-auto max-h-[92dvh] w-[min(58rem,calc(100vw-2rem))] overflow-y-auto p-0 text-primary backdrop:bg-black/70">
+      className="card m-auto max-h-[92dvh] w-[min(58rem,calc(100vw-2rem))] overflow-y-auto p-0 text-primary backdrop:bg-scrim/70">
       <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-subtle bg-card px-5 py-4">
         <div>
           <h2 className="text-base font-semibold">Commit and {review?.providerLabel ?? 'pull request'}</h2>

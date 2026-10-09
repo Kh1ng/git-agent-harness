@@ -72,7 +72,7 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
   const combinedOutput = [output?.stdout, output?.stderr].filter(Boolean).join('');
 
   return (
-    <dialog ref={dialog} onClose={onClose} aria-label={`Session: ${name}`} className="session-dialog card p-0 text-primary max-w-3xl max-h-[90dvh] overflow-hidden backdrop:bg-black/70">
+    <dialog ref={dialog} onClose={onClose} aria-label={`Session: ${name}`} className="session-dialog card p-0 text-primary max-w-3xl max-h-[90dvh] overflow-hidden backdrop:bg-scrim/70">
       <div className="flex max-h-[90dvh] flex-col">
         <div className="flex shrink-0 justify-between items-center gap-2 p-4 sm:p-5 border-b border-subtle">
           <div className="flex items-center gap-3 min-w-0">

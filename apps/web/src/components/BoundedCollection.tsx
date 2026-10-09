@@ -39,7 +39,7 @@ export function BoundedCollection<T>({ items, query, searchText, isSelected, lab
       {visible.map(children)}
       {candidates.length > 10 && (
         <button type="button" aria-expanded={expanded} onClick={() => setExpandedQuery(expanded ? null : normalized)}
-          className="rounded px-2 py-2 text-sm text-secondary hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+          className="rounded px-2 py-2 text-sm text-secondary hover:bg-overlay/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
           {expanded ? 'Show fewer' : 'Show all'}
         </button>
       )}

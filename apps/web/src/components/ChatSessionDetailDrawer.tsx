@@ -72,7 +72,7 @@ export function ChatSessionDetailDrawer({
   return (
     <dialog ref={dialog} aria-labelledby="chat-session-detail-title" onCancel={onClose}
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-      className="fixed inset-0 z-50 m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-transparent p-0 backdrop:bg-black/35">
+      className="fixed inset-0 z-50 m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-transparent p-0 backdrop:bg-scrim/35">
       <aside className="ml-auto flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-subtle bg-page shadow-2xl sm:max-w-xl">
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-subtle px-4 py-4 sm:px-6">
           <div className="min-w-0">
@@ -129,7 +129,7 @@ export function ChatSessionDetailDrawer({
               : !skillBinding.supported ? <p className="text-xs text-muted">This backend does not support bound skills.</p>
                 : skillBinding.skills.length === 0 ? <p className="text-xs text-muted">No compatible skills are installed.</p>
                   : <div className="divide-y divide-subtle rounded-lg border border-subtle">
-                    {skillBinding.skills.map((skill) => <label key={skill.id} className="flex cursor-pointer gap-3 px-3 py-2.5 hover:bg-white/5">
+                    {skillBinding.skills.map((skill) => <label key={skill.id} className="flex cursor-pointer gap-3 px-3 py-2.5 hover:bg-overlay/5">
                       <input type="checkbox" className="mt-0.5 accent-[rgb(var(--accent))]" checked={skillBinding.selectedIds.includes(skill.id)}
                         disabled={archived || turnBusy || skillBusy} onChange={() => void onToggleSkill(skill.id)} />
                       <span className="min-w-0"><span className="block text-sm text-primary">{skill.displayName}</span><span className="block break-words text-xs text-muted">{skill.description || `${skill.id} · ${skill.version}`}</span></span>

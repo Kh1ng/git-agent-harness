@@ -63,7 +63,7 @@ export function ProjectRail({
   const liveSessions = sessions.filter((session) => session.outcome === 'live');
   const archivedSessions = sessions.filter((session) => session.outcome !== 'live');
   const sessionClasses = (active: boolean) =>
-    `block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`;
+    `block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-overlay/5'}`;
 
   const pendingAction = useUiStore((state) => state.pendingAction);
   const requestAction = useUiStore((state) => state.requestAction);
@@ -126,7 +126,7 @@ export function ProjectRail({
                 return (
                   <button key={projectKey({ node_id: owner, name: project.name })} type="button"
                     onClick={() => onSelect(selection, owner || undefined)}
-                    className={`block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`}
+                    className={`block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-overlay/5'}`}
                     aria-current={active ? 'page' : undefined} title={`Runs on ${nodeName(owner)}`}>
                     <span className="block truncate text-sm text-primary">{project.display_name || project.name}</span>
                     <span className="block truncate text-[11px] text-muted">{project.repo}</span>
@@ -142,7 +142,7 @@ export function ProjectRail({
         <div className="flex items-center justify-between gap-2 px-1 pb-2">
           <h3 id="chat-list-title" className="text-xs font-semibold uppercase tracking-wide text-muted">Chats</h3>
           {sessionsError ? (
-            <button type="button" onClick={onRetrySessions} className="text-[11px] text-amber-300 hover:text-primary">Retry</button>
+            <button type="button" onClick={onRetrySessions} className="text-[11px] text-warning hover:text-primary">Retry</button>
           ) : (
             <span className="text-xs tabular-nums text-muted">{liveSessions.length + 1}</span>
           )}
@@ -169,7 +169,7 @@ export function ProjectRail({
 
         {archivedSessions.length > 0 && (
           <details className="mt-2" open={archivedSessions.some((session) => session.id === selectedSessionId) || undefined}>
-            <summary className="cursor-pointer select-none rounded px-2 py-1 text-xs text-muted hover:bg-white/5 hover:text-primary">
+            <summary className="cursor-pointer select-none rounded px-2 py-1 text-xs text-muted hover:bg-overlay/5 hover:text-primary">
               Archived ({archivedSessions.length})
             </summary>
             <nav aria-label="Archived chats" className="mt-1 space-y-1">
@@ -246,7 +246,7 @@ export function ProjectRail({
         </details>
 
         {message && (
-          <p role={message.tone === 'error' ? 'alert' : 'status'} className={`text-[11px] leading-relaxed ${message.tone === 'error' ? 'text-red-400' : 'text-secondary'}`}>
+          <p role={message.tone === 'error' ? 'alert' : 'status'} className={`text-[11px] leading-relaxed ${message.tone === 'error' ? 'text-critical' : 'text-secondary'}`}>
             {message.text}
           </p>
         )}

@@ -94,7 +94,7 @@ export function AgentsPage({ sessions, deviceAgents, onNavigate, onWatchRun }: {
           ['capacity', 'Models & capacity'],
           ['routing', 'Advanced routing'],
         ] as const).map(([id, label]) => <button key={id} type="button" aria-pressed={view === id}
-          onClick={() => setView(id)} className={`min-h-11 rounded-md px-4 py-2 text-sm font-medium ${view === id ? 'bg-accent/15 text-primary ring-1 ring-accent/40' : 'text-secondary hover:bg-white/5'}`}>{label}</button>)}
+          onClick={() => setView(id)} className={`min-h-11 rounded-md px-4 py-2 text-sm font-medium ${view === id ? 'bg-accent/15 text-primary ring-1 ring-accent/40' : 'text-secondary hover:bg-overlay/5'}`}>{label}</button>)}
       </nav>
 
       {view === 'activity' && <>

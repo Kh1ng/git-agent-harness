@@ -227,7 +227,7 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
       aria-labelledby="work-detail-title"
       onCancel={onClose}
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-      className="fixed inset-0 z-50 m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-transparent p-0 backdrop:bg-black/35"
+      className="fixed inset-0 z-50 m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-transparent p-0 backdrop:bg-scrim/35"
     >
       <aside
         className="ml-auto flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-subtle bg-page shadow-2xl sm:max-w-2xl"

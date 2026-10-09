@@ -240,10 +240,10 @@ export function ProviderPicker({
     setOpen((v) => !v);
   };
 
-  const starClasses = (saved: boolean) => `shrink-0 ${saved ? 'fill-amber-400 text-amber-400' : 'text-muted'}`;
+  const starClasses = (saved: boolean) => `shrink-0 ${saved ? 'fill-warning text-warning' : 'text-muted'}`;
   const rowClasses = (selected: boolean, enabled: boolean) =>
     `touch-target flex min-w-0 flex-1 items-center rounded px-1.5 py-1 text-left text-xs max-sm:min-h-11 max-sm:min-w-11 ${
-      selected ? 'bg-accent/15 text-primary' : enabled ? 'text-secondary hover:bg-white/5' : 'text-muted'
+      selected ? 'bg-accent/15 text-primary' : enabled ? 'text-secondary hover:bg-overlay/5' : 'text-muted'
     } disabled:cursor-not-allowed`;
   const sectionLabel = 'text-[10px] font-semibold uppercase tracking-wide text-muted';
 
@@ -258,7 +258,7 @@ export function ProviderPicker({
         aria-expanded={open}
         aria-label={triggerAriaLabel}
         title={busy ? 'Switching provider is disabled while a turn is in flight' : variant === 'backend' ? 'Provider' : 'Provider, model, and reasoning effort'}
-        className={`touch-target inline-flex max-w-[14rem] ${variant === 'backend' ? '' : 'max-sm:max-w-[5.5rem]'} max-sm:min-h-11 max-sm:min-w-11 items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 disabled:opacity-50`}
+        className={`touch-target inline-flex max-w-[14rem] ${variant === 'backend' ? '' : 'max-sm:max-w-[5.5rem]'} max-sm:min-h-11 max-sm:min-w-11 items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-overlay/5 disabled:opacity-50`}
       >
         <Cpu size={13} className="shrink-0 text-muted" aria-hidden="true" />
         <span className="truncate">{pillLabel}</span>
@@ -279,7 +279,7 @@ export function ProviderPicker({
             <button
               type="button"
               onClick={() => { setOpen(false); triggerRef.current?.focus(); }}
-              className="touch-target inline-flex items-center justify-center rounded text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
+              className="touch-target inline-flex items-center justify-center rounded text-muted hover:bg-overlay/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
               aria-label="Close provider picker"
             >
               <X size={16} aria-hidden="true" />
@@ -315,7 +315,7 @@ export function ProviderPicker({
                       type="button"
                       onClick={() => toggleFavorite(currentEntry)}
                       aria-pressed={currentSaved}
-                      className="touch-target inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-secondary hover:bg-white/5 max-sm:min-h-11 max-sm:min-w-11"
+                      className="touch-target inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-secondary hover:bg-overlay/5 max-sm:min-h-11 max-sm:min-w-11"
                       title={currentSaved ? 'Remove the current selection from favorites' : 'Save the current selection as a favorite'}
                     >
                       <Star size={11} className={starClasses(currentSaved)} aria-hidden="true" />
@@ -338,17 +338,17 @@ export function ProviderPicker({
                             type="button"
                             onClick={() => applyEntry(favorite)}
                             disabled={!enabled}
-                            className="touch-target min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11"
+                            className="touch-target min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-overlay/5 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11"
                             aria-label={`Apply ${entryLabel(favorite)}`}
                             title={enabled ? 'Apply this favorite' : 'This provider is unavailable'}
                           >
-                            <Star size={10} className="mr-1.5 inline fill-amber-400 text-amber-400" aria-hidden="true" />
+                            <Star size={10} className="mr-1.5 inline fill-warning text-warning" aria-hidden="true" />
                             {entryLabel(favorite)}
                           </button>
                           <button
                             type="button"
                             onClick={() => toggleFavorite(favorite)}
-                            className="touch-target shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
+                            className="touch-target shrink-0 rounded p-1 text-muted hover:bg-overlay/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                             aria-label={`Remove ${entryLabel(favorite)} from favorites`}
                           >
                             <X size={11} aria-hidden="true" />
@@ -366,7 +366,7 @@ export function ProviderPicker({
                             <button
                               type="button"
                               onClick={() => applyEntry(entry)}
-                              className="touch-target min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-white/5 max-sm:min-h-11 max-sm:min-w-11"
+                              className="touch-target min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-overlay/5 max-sm:min-h-11 max-sm:min-w-11"
                               aria-label={`Apply ${entryLabel(entry)}`}
                             >
                               {entryLabel(entry)}
@@ -376,7 +376,7 @@ export function ProviderPicker({
                               onClick={() => toggleFavorite(entry)}
                               aria-pressed={isFavorite(entry)}
                               aria-label={`Favorite ${entryLabel(entry)}`}
-                              className="touch-target shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
+                              className="touch-target shrink-0 rounded p-1 text-muted hover:bg-overlay/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                             >
                               <Star size={11} className={starClasses(isFavorite(entry))} aria-hidden="true" />
                             </button>
@@ -398,7 +398,7 @@ export function ProviderPicker({
                         onClick={() => selectedBackendId && onSelect({ backendId: selectedBackendId, modelId: currentModelId, reasoningEffortId: null })}
                         aria-current={currentReasoningEffortId === null ? 'true' : undefined}
                         className={`touch-target rounded-full border px-2.5 py-1 text-xs max-sm:min-h-11 max-sm:min-w-11 max-sm:px-4 ${
-                          currentReasoningEffortId === null ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-white/5'
+                          currentReasoningEffortId === null ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-overlay/5'
                         }`}
                       >
                         Default
@@ -412,7 +412,7 @@ export function ProviderPicker({
                         aria-current={effort.id === currentReasoningEffortId ? 'true' : undefined}
                         title={effort.description}
                         className={`touch-target rounded-full border px-2.5 py-1 text-xs max-sm:min-h-11 max-sm:min-w-11 max-sm:px-4 ${
-                          effort.id === currentReasoningEffortId ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-white/5'
+                          effort.id === currentReasoningEffortId ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-overlay/5'
                         }`}
                       >
                         {effort.name}

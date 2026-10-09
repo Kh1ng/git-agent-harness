@@ -183,7 +183,7 @@ export function WorkerScalingSection({ selectedName, selected, agents }: WorkerS
               {scaling.boost_until ? `Until ${new Date(scaling.boost_until).toLocaleString()}` : 'Until you end it'}
             </span>
           </p>
-          <button onClick={endBoost} disabled={saving} className={`bg-raised border border-subtle text-secondary hover:bg-white/5 ${BUTTON_CLASS}`}>
+          <button onClick={endBoost} disabled={saving} className={`bg-raised border border-subtle text-secondary hover:bg-overlay/5 ${BUTTON_CLASS}`}>
             <X size={14} aria-hidden="true" />
             Remove extra capacity
           </button>

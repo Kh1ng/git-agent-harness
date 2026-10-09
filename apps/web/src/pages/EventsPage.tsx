@@ -171,7 +171,7 @@ export function EventsPage({ openedEventId = null }: { openedEventId?: string | 
 
   const tab = (id: View, label: string) => (
     <button type="button" role="tab" aria-selected={view === id} onClick={() => setView(id)}
-      className={`rounded-md px-3 py-1.5 text-xs ${view === id ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}>
+      className={`rounded-md px-3 py-1.5 text-xs ${view === id ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-overlay/5'}`}>
       {label}
     </button>
   );

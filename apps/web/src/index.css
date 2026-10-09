@@ -2,15 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Semantic text colors meet 4.5:1 on page, card, and raised surfaces.
-   Chart series remain independent from status text and button fills. */
-:root {
+/* Color tokens, one block per theme in src/lib/themes.ts. Components use only
+   these (through the Tailwind colors in tailwind.config.js), never palette
+   classes like text-red-400 or bg-white/5, so a theme is complete when every
+   token below has a value in its block.
+   Semantic text and status colors meet 4.5:1 on page, card and raised
+   surfaces, and on their own badge tint; on-fill meets 4.5:1 on accent-fill
+   and critical-fill. Navigation.spec.tsx checks this for every theme.
+   Chart series stay independent from status text and button fills, and their
+   order is fixed: never reassigned per filter. */
+:root,
+[data-theme='dark'] {
   color-scheme: dark;
   --surface-page: 13 13 13;      /* #0d0d0d */
   --surface-card: 26 26 25;      /* #1a1a19 */
   --surface-raised: 35 35 33;    /* #232321, one step up for popovers/modals */
-  --border-hairline: 255 255 255; /* used at 10% alpha */
   --border-subtle: 44 44 42;     /* #2c2c2a gridline-strength border */
+  --overlay: 255 255 255;
+  --scrim: 0 0 0;
 
   --ink-primary: 255 255 255;
   --ink-secondary: 195 194 183;  /* #c3c2b7 */
@@ -22,10 +31,11 @@
   --status-critical: 245 115 115;
   --status-unknown: 145 143 137; /* same as ink-muted: neutral, not alarming */
 
-  --accent-fill: 30 98 180;      /* fill behind white text (6.07:1); not overridden per theme, both rely on it */
   --accent: 80 155 245;
+  --accent-fill: 30 98 180;      /* 6.07:1 under on-fill */
+  --critical-fill: 179 39 39;
+  --on-fill: 255 255 255;
 
-  /* Categorical series order is fixed -- never reassigned per filter. */
   --series-1: 57 135 229;   /* blue */
   --series-2: 25 158 112;   /* aqua */
   --series-3: 201 133 0;    /* yellow */
@@ -41,8 +51,9 @@
   --surface-page: 249 249 247;   /* #f9f9f7 */
   --surface-card: 252 252 251;   /* #fcfcfb */
   --surface-raised: 255 255 255;
-  --border-hairline: 11 11 11;
   --border-subtle: 225 224 217;  /* #e1e0d9 */
+  --overlay: 11 11 11;
+  --scrim: 0 0 0;
 
   --ink-primary: 11 11 11;
   --ink-secondary: 82 81 78;     /* #52514e */
@@ -55,6 +66,9 @@
   --status-unknown: 108 106 100;
 
   --accent: 30 98 180;
+  --accent-fill: 30 98 180;
+  --critical-fill: 179 39 39;
+  --on-fill: 255 255 255;
 
   --series-1: 42 120 214;
   --series-2: 27 175 122;
@@ -66,32 +80,41 @@
   --series-8: 235 104 52;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) {
-    color-scheme: light;
-    --surface-page: 249 249 247;
-    --surface-card: 252 252 251;
-    --surface-raised: 255 255 255;
-    --border-hairline: 11 11 11;
-    --border-subtle: 225 224 217;
-    --ink-primary: 11 11 11;
-    --ink-secondary: 82 81 78;
-    --ink-muted: 108 106 100;
-    --status-good: 17 113 39;
-    --status-warning: 136 87 0;
-    --status-serious: 164 61 23;
-    --status-critical: 179 39 39;
-    --status-unknown: 108 106 100;
-    --accent: 30 98 180;
-    --series-1: 42 120 214;
-    --series-2: 27 175 122;
-    --series-3: 237 161 0;
-    --series-4: 0 131 0;
-    --series-5: 74 58 167;
-    --series-6: 227 73 72;
-    --series-7: 232 123 164;
-    --series-8: 235 104 52;
-  }
+/* Gruvbox dark, hard contrast. Status tones are the Gruvbox bright hues;
+   red and orange fall short of 4.5:1 as published and are lightened only as
+   far as that needs. Fills take dark text, as Gruvbox does. */
+[data-theme='gruvbox'] {
+  color-scheme: dark;
+  --surface-page: 29 32 33;      /* bg0_h #1d2021 */
+  --surface-card: 40 40 40;      /* bg0 #282828 */
+  --surface-raised: 50 48 47;    /* bg0_s #32302f */
+  --border-subtle: 80 73 69;     /* bg2 #504945 */
+  --overlay: 235 219 178;
+  --scrim: 0 0 0;
+
+  --ink-primary: 235 219 178;    /* fg1 #ebdbb2 */
+  --ink-secondary: 213 196 161;  /* fg2 #d5c4a1 */
+  --ink-muted: 168 153 132;      /* fg4 #a89984 */
+
+  --status-good: 184 187 38;     /* green #b8bb26 */
+  --status-warning: 250 189 47;  /* yellow #fabd2f */
+  --status-serious: 254 141 48;  /* orange #fe8019, lightened */
+  --status-critical: 252 128 113; /* red #fb4934, lightened */
+  --status-unknown: 168 153 132;
+
+  --accent: 131 165 152;         /* blue #83a598 */
+  --accent-fill: 131 165 152;
+  --critical-fill: 251 73 52;    /* red #fb4934 */
+  --on-fill: 29 32 33;
+
+  --series-1: 131 165 152;  /* blue */
+  --series-2: 142 192 124;  /* aqua */
+  --series-3: 250 189 47;   /* yellow */
+  --series-4: 184 187 38;   /* green */
+  --series-5: 211 134 155;  /* purple */
+  --series-6: 251 73 52;    /* red */
+  --series-7: 177 98 134;   /* neutral purple */
+  --series-8: 254 128 25;   /* orange */
 }
 
 @layer base {
@@ -149,7 +172,7 @@
   }
 
   .chat-menu-item {
-    @apply flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-secondary hover:bg-white/5 hover:text-primary disabled:opacity-50 disabled:hover:bg-transparent;
+    @apply flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-secondary hover:bg-overlay/5 hover:text-primary disabled:opacity-50 disabled:hover:bg-transparent;
   }
 
   .mobile-drawer {
@@ -180,15 +203,23 @@
   }
 
   .btn-primary {
-    @apply btn text-white;
+    @apply btn text-on-fill;
     background-color: rgb(var(--accent-fill));
   }
   .btn-primary:hover:not(:disabled) {
     filter: brightness(0.9);
   }
 
+  .btn-danger {
+    @apply btn text-on-fill;
+    background-color: rgb(var(--critical-fill));
+  }
+  .btn-danger:hover:not(:disabled) {
+    filter: brightness(0.9);
+  }
+
   .btn-secondary {
-    @apply btn bg-raised text-primary border border-subtle hover:bg-white/5;
+    @apply btn bg-raised text-primary border border-subtle hover:bg-overlay/5;
   }
 
   .badge {
@@ -234,7 +265,7 @@
     @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-secondary transition-colors;
   }
   .nav-link:hover {
-    @apply text-primary bg-white/5;
+    @apply text-primary bg-overlay/5;
   }
   .nav-link-active {
     @apply text-primary;
@@ -245,7 +276,7 @@
     @apply flex shrink-0 items-center gap-2 border-b-2 border-transparent px-3 py-3 text-sm font-medium text-secondary transition-colors;
   }
   .top-nav-link:hover {
-    @apply text-primary bg-white/5;
+    @apply text-primary bg-overlay/5;
   }
   .top-nav-link-active {
     @apply text-primary;
@@ -256,7 +287,7 @@
     @apply relative flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-secondary transition-colors;
   }
   .activity-bar-button:hover {
-    @apply text-primary bg-white/5;
+    @apply text-primary bg-overlay/5;
   }
   .activity-bar-button-active {
     @apply text-primary;
@@ -359,7 +390,7 @@
   }
   .chat-markdown :not(pre) > code {
     @apply rounded px-1 py-0.5 font-mono text-[0.9em];
-    background-color: rgb(0 0 0 / 0.2);
+    background-color: rgb(var(--overlay) / 0.1);
   }
   .chat-markdown pre {
     @apply max-w-full overflow-x-auto rounded-md bg-page p-3 font-mono text-xs;
@@ -372,7 +403,7 @@
 }
 
 @media (pointer: coarse) {
-  .btn, .btn-primary, .btn-secondary, .nav-link, .touch-target {
+  .btn, .btn-primary, .btn-danger, .btn-secondary, .nav-link, .touch-target {
     min-height: 44px;
     min-width: 44px;
   }

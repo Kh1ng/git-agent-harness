@@ -7,8 +7,9 @@
  */
 import { create } from 'zustand';
 import { readNavigation, updateNavigation } from '../lib/navigationState.js';
+import { applyTheme, DEFAULT_THEME, isTheme, type Theme } from '../lib/themes.js';
 
-export type Theme = 'dark' | 'light';
+export type { Theme } from '../lib/themes.js';
 
 interface UiStoreState {
   theme: Theme;
@@ -30,10 +31,9 @@ interface UiStoreState {
 }
 
 function initialTheme(): Theme {
-  if (typeof window === 'undefined') return 'dark';
+  if (typeof window === 'undefined') return DEFAULT_THEME;
   const stored = window.localStorage.getItem('gah-theme');
-  if (stored === 'light' || stored === 'dark') return stored;
-  return 'dark';
+  return isTheme(stored) ? stored : DEFAULT_THEME;
 }
 
 export const useUiStore = create<UiStoreState>((set) => ({
@@ -45,9 +45,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
     set({ notificationPopups });
   },
   setTheme: (theme) => {
-    if (typeof document !== 'undefined') {
-      document.documentElement.setAttribute('data-theme', theme);
-    }
+    applyTheme(theme);
     if (typeof window !== 'undefined') {
       window.localStorage.setItem('gah-theme', theme);
     }
