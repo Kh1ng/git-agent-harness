@@ -21,6 +21,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { detectTailscaleIPv4 } from '../tailscaleDetect.js';
+import { isIP } from 'node:net';
 import { resolveBindHost } from '../bindHost.js';
 
 export interface PreviewInfo {
@@ -85,7 +86,7 @@ class PreviewProxy {
   configure(opts: PreviewProxyOptions): void {
     if (opts.basePort !== undefined) this.options.basePort = opts.basePort;
     if (opts.maxPort !== undefined) this.options.maxPort = opts.maxPort;
-    if (opts.advertiseHost !== undefined) this.options.advertiseHost = opts.advertiseHost;
+    if ('advertiseHost' in opts) this.options.advertiseHost = opts.advertiseHost;
     if (opts.bindHost !== undefined) this.options.bindHost = opts.bindHost;
     if (opts.protectedPorts !== undefined) this.options.protectedPorts = opts.protectedPorts;
   }
@@ -102,6 +103,21 @@ class PreviewProxy {
     if (devPort >= this.options.basePort && devPort <= this.options.maxPort) {
       throw new PreviewTargetRefusedError(`Port ${devPort} is in the preview listener range and cannot be previewed.`);
     }
+  }
+
+  private bindHost(): string {
+    return this.options.bindHost ?? resolveBindHost();
+  }
+
+  /** A listener bound to one interface is only reachable at that address,
+   * so the advertised URL must use it; a wildcard bind keeps the Tailscale
+   * detection. */
+  private async defaultAdvertiseHost(): Promise<string> {
+    const bind = this.bindHost();
+    if (bind === '0.0.0.0' || bind === '::' || bind === '') {
+      return (await detectTailscaleIPv4()) ?? '127.0.0.1';
+    }
+    return isIP(bind) === 6 ? `[${bind}]` : bind;
   }
 
   get(profile: string, sessionId: string): PreviewInfo | null {
@@ -157,7 +173,7 @@ class PreviewProxy {
     } as PreviewEntry;
     entry.server = this.createProxyServer(() => entry.devPort);
     const listenPort = await this.listenOnFreePort(entry.server);
-    const host = this.options.advertiseHost ?? (await detectTailscaleIPv4()) ?? '127.0.0.1';
+    const host = this.options.advertiseHost ?? (await this.defaultAdvertiseHost());
     entry.listenPort = listenPort;
     entry.url = `http://${host}:${listenPort}`;
     this.byKey.set(key, entry);
@@ -268,7 +284,7 @@ class PreviewProxy {
         }
         const port = candidates[index];
         server.once('error', () => tryNext(index + 1));
-        server.listen(port, this.options.bindHost ?? resolveBindHost(), () => resolve(port));
+        server.listen(port, this.bindHost(), () => resolve(port));
       };
       tryNext(0);
     });

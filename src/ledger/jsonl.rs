@@ -183,23 +183,34 @@ fn final_record(path: &Path) -> Result<FinalRecord> {
     };
     let len = file.metadata()?.len();
     let mut start = len;
-    let mut bytes: Vec<u8> = Vec::new();
+    // Chunks are collected newest-first and joined once, so a long final
+    // record costs one copy, not one per chunk.
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
     const CHUNK: u64 = 64 * 1024;
     while start > 0 {
         let read_from = start.saturating_sub(CHUNK);
         let mut chunk = vec![0; (start - read_from) as usize];
         file.seek(SeekFrom::Start(read_from))?;
         file.read_exact(&mut chunk)?;
-        chunk.extend_from_slice(&bytes);
-        bytes = chunk;
         start = read_from;
         // The byte that ends the previous record is enough context: a final
         // newline means the tail is framed, otherwise the record runs back
         // to the previous newline.
-        let search_end = bytes.len().saturating_sub(1);
-        if bytes.ends_with(b"\n") || bytes[..search_end].contains(&b'\n') {
+        let is_tail = chunks.is_empty();
+        let search_end = if is_tail {
+            chunk.len().saturating_sub(1)
+        } else {
+            chunk.len()
+        };
+        let boundary = (is_tail && chunk.ends_with(b"\n")) || chunk[..search_end].contains(&b'\n');
+        chunks.push(chunk);
+        if boundary {
             break;
         }
+    }
+    let mut bytes: Vec<u8> = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
+    for chunk in chunks.iter().rev() {
+        bytes.extend_from_slice(chunk);
     }
     if bytes.ends_with(b"\n") {
         return Ok(FinalRecord {

@@ -713,12 +713,35 @@ fn write_askpass() -> Result<tempfile::TempPath> {
 /// on a PR whose head is `main` (common for fork PRs), or an
 /// `--existing-branch main`, would otherwise push agent output straight to
 /// the default branch. A refspec (`src:dst`) could name any destination.
-fn ensure_publishable_branch(branch: &str, target_branch: &str) -> Result<()> {
+/// Returns the plain branch name gah may publish to, or refuses. Symbolic
+/// refs (`HEAD`, `@`), tags, refspecs and anything `git check-ref-format`
+/// would reject are refused, as is the target branch itself: `git push <url>
+/// HEAD` with the target checked out would publish straight onto it.
+fn ensure_publishable_branch(branch: &str, target_branch: &str) -> Result<String> {
     let name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
     let target = target_branch
         .strip_prefix("refs/heads/")
         .unwrap_or(target_branch);
-    if name.is_empty() || name.contains(':') || name.starts_with('+') || name.starts_with('-') {
+    let bad_component = |component: &str| {
+        component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with(".lock")
+            || component == "@"
+    };
+    let malformed = name.is_empty()
+        || name == "HEAD"
+        || name.starts_with("refs/")
+        || name.starts_with('+')
+        || name.starts_with('-')
+        || name.contains(':')
+        || name.contains("..")
+        || name.contains("@{")
+        || name.ends_with('/')
+        || name.split('/').any(bad_component)
+        || name
+            .chars()
+            .any(|c| c.is_control() || " ~^?*[\\".contains(c));
+    if malformed {
         anyhow::bail!("refusing to push: {branch:?} is not a plain branch name");
     }
     if name == target {
@@ -726,7 +749,7 @@ fn ensure_publishable_branch(branch: &str, target_branch: &str) -> Result<()> {
             "refusing to push: {branch:?} is the target branch; gah publishes only to work branches"
         );
     }
-    Ok(())
+    Ok(name.to_string())
 }
 
 pub fn stage_all(worktree: &Path) -> Result<()> {
@@ -829,8 +852,11 @@ pub fn push_branch(
     push_url: &str,
     pat: &str,
 ) -> Result<()> {
-    ensure_publishable_branch(branch, target_branch)?;
-    push_branch_with_executable(Path::new("git"), worktree, branch, push_url, pat)
+    let name = ensure_publishable_branch(branch, target_branch)?;
+    // An explicit refspec: `HEAD` or a tag named like the branch can never
+    // resolve to a branch the guard above did not see.
+    let refspec = format!("refs/heads/{name}:refs/heads/{name}");
+    push_branch_with_executable(Path::new("git"), worktree, &refspec, push_url, pat)
 }
 
 fn push_branch_with_executable(

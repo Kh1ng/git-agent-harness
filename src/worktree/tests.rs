@@ -363,6 +363,14 @@ fn push_branch_refuses_the_target_branch_and_refspecs() {
         ("HEAD:main", "main"),
         ("gah/x:release", "main"),
         ("+gah/x", "main"),
+        ("HEAD", "main"),
+        ("@", "main"),
+        ("refs/tags/v1", "main"),
+        ("gah/x..y", "main"),
+        ("gah/x.lock", "main"),
+        ("gah/.hidden", "main"),
+        ("gah/x y", "main"),
+        ("gah/x/", "main"),
     ] {
         let err = push_branch(&repo, branch, target, remote.to_str().unwrap(), "").unwrap_err();
         assert!(

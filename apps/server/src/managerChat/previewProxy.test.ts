@@ -7,11 +7,24 @@ import rateLimit from 'express-rate-limit';
 import { previewProxy, detectDevPort, PreviewTargetRefusedError } from './previewProxy.js';
 import { authMiddleware } from '../authMiddleware.js';
 
+const TEST_BASE_PORT = 44_900;
+const TEST_MAX_PORT = 44_949;
+
+/** listen(0) on an ephemeral port outside the preview range the tests
+ * configure, which `set()` refuses as a target. */
+async function listenOutsidePreviewRange(server: http.Server): Promise<number> {
+  for (;;) {
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const port = (server.address() as AddressInfo).port;
+    if (port < TEST_BASE_PORT || port > TEST_MAX_PORT) return port;
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+}
+
 /** A fake dev server that records the Host header it was served with. */
 async function fakeDevServer(handler: http.RequestListener): Promise<{ server: http.Server; port: number; close: () => Promise<void> }> {
   const server = http.createServer(handler);
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
-  const port = (server.address() as AddressInfo).port;
+  const port = await listenOutsidePreviewRange(server);
   return {
     server,
     port,
@@ -45,7 +58,7 @@ test('detectDevPort matches common dev-server output shapes, last match wins', (
 });
 
 test('preview proxy serves the dev server through a dedicated port with the Host rewritten to localhost', async () => {
-  previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1' });
+  previewProxy.configure({ basePort: TEST_BASE_PORT, maxPort: TEST_MAX_PORT, advertiseHost: '127.0.0.1' });
   const seenHosts: string[] = [];
   const dev = await fakeDevServer((req, res) => {
     seenHosts.push(String(req.headers.host));
@@ -76,7 +89,7 @@ test('preview proxy serves the dev server through a dedicated port with the Host
 });
 
 test('preview proxy re-points a session to a new dev port (stable URL) and reports unreachable targets as 502', async () => {
-  previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1' });
+  previewProxy.configure({ basePort: TEST_BASE_PORT, maxPort: TEST_MAX_PORT, advertiseHost: '127.0.0.1' });
   const first = await fakeDevServer((_req, res) => { res.end('one'); });
   const second = await fakeDevServer((_req, res) => { res.end('two'); });
   try {
@@ -111,13 +124,12 @@ test('a preview never inherits the control plane\'s loopback owner trust', async
   // The proxy connects upstream from loopback with Host rewritten to
   // localhost. Without a forwarding marker, authMiddleware would treat a
   // remote preview visitor as the local owner.
-  previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1', bindHost: '127.0.0.1', protectedPorts: [] });
+  previewProxy.configure({ basePort: TEST_BASE_PORT, maxPort: TEST_MAX_PORT, advertiseHost: '127.0.0.1', bindHost: '127.0.0.1', protectedPorts: [] });
   const app = express();
   app.use(rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware);
   app.get('/api/whoami', (_req, res) => { res.json({ principal: res.locals.authPrincipal }); });
   const api = http.createServer(app);
-  await new Promise<void>((done) => api.listen(0, '127.0.0.1', done));
-  const apiPort = (api.address() as AddressInfo).port;
+  const apiPort = await listenOutsidePreviewRange(api);
   try {
     const direct = await fetchUrl(`http://127.0.0.1:${apiPort}/api/whoami`);
     assert.equal(direct.status, 200, 'a direct loopback request is the local owner');
@@ -131,8 +143,24 @@ test('a preview never inherits the control plane\'s loopback owner trust', async
 });
 
 test('a preview refuses the control-plane port and its own listener range', async () => {
-  previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1', protectedPorts: [3773] });
+  previewProxy.configure({ basePort: TEST_BASE_PORT, maxPort: TEST_MAX_PORT, advertiseHost: '127.0.0.1', protectedPorts: [3773] });
   await assert.rejects(previewProxy.set('p', 'cp', 3773), PreviewTargetRefusedError);
   await assert.rejects(previewProxy.set('p', 'loop', 44_910), PreviewTargetRefusedError);
   assert.equal(previewProxy.get('p', 'cp'), null);
+});
+
+test('a preview bound to one interface advertises that interface', async () => {
+  // With HOST=127.0.0.1 and no advertiseHost, a Tailscale address would be
+  // unreachable: the listener only accepts connections on the bind address.
+  previewProxy.configure({ basePort: TEST_BASE_PORT, maxPort: TEST_MAX_PORT, advertiseHost: undefined, bindHost: '127.0.0.1', protectedPorts: [] });
+  const dev = await fakeDevServer((_req, res) => { res.end('ok'); });
+  try {
+    const preview = await previewProxy.set('p', 'bound', dev.port);
+    assert.ok(preview.url.startsWith('http://127.0.0.1:'), preview.url);
+    assert.equal((await fetchUrl(preview.url)).body, 'ok');
+  } finally {
+    await previewProxy.clear('p', 'bound');
+    await dev.close();
+    previewProxy.configure({ advertiseHost: '127.0.0.1' });
+  }
 });
