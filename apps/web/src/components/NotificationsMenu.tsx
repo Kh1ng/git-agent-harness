@@ -88,7 +88,7 @@ export function NotificationsMenu({ liveActivity, muted = false, unreadCount, re
   return (
     <div className="relative" ref={menu}>
       <button type="button" onClick={() => { setOpen(!open); setPopup(null); }}
-        className="relative flex h-10 w-10 items-center justify-center rounded-md text-secondary hover:bg-white/5 hover:text-primary"
+        className="relative flex h-10 w-10 items-center justify-center rounded-md text-secondary hover:bg-overlay/5 hover:text-primary"
         aria-label="Notifications" aria-expanded={open} aria-haspopup="true" title="Notifications">
         <Bell size={18} aria-hidden="true" />
         {unreadCount > 0 && (

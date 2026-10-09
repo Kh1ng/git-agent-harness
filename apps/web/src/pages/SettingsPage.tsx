@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { Sun, Moon, Info, Save, Loader2, Eye, EyeOff, Copy, Check, ChevronRight, Search } from 'lucide-react';
+import { Info, Save, Loader2, Eye, EyeOff, Copy, Check, ChevronRight, Search } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -12,6 +12,7 @@ import { EmptyState } from '../components/ui/EmptyState.js';
 import { SkillBankSettingsSection } from '../components/SkillBankSettingsSection.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { ExternalAnchor } from '../components/ExternalAnchor.js';
+import { ThemePicker } from '../components/ThemePicker.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings, NodeResources } from '@git-agent-harness/contracts';
@@ -29,7 +30,7 @@ const SETTINGS_SECTION_TITLES: Record<SettingsSectionId, string> = { general: 'G
  * Per-profile dispatch and routing live in the Profile sidebar, not here. */
 const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keywords: string }[] = [
   { heading: 'Connection & pairing', section: null, keywords: 'access token device pair qr central server' },
-  { heading: 'Appearance', section: 'general', keywords: 'theme dark light notifications popup bell' },
+  { heading: 'Appearance', section: 'general', keywords: 'theme dark light gruvbox notifications popup bell' },
   { heading: 'Global manager', section: 'general', keywords: 'manager wake autonomy' },
   { heading: 'Machine capacity', section: 'general', keywords: 'node capacity memory cpu cores ceiling reservation floor admission workers' },
   { heading: 'Notification channel', section: 'general', keywords: 'notifications alerts telegram' },
@@ -43,7 +44,7 @@ const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keyw
 
 export function SettingsPage() {
   const { serverVersion, profile } = useWebSocket();
-  const { theme, setTheme, notificationPopups, setNotificationPopups, profileOverride } = useUiStore();
+  const { notificationPopups, setNotificationPopups, profileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const config = useGahStore((s) => s.config);
@@ -146,7 +147,7 @@ export function SettingsPage() {
             {matches.length === 0 && <li className="px-3 py-2 text-sm text-muted">No settings match.</li>}
             {matches.map((entry) => (
               <li key={entry.heading}>
-                <button type="button" onClick={() => openResult(entry)} className="flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-primary hover:bg-white/5">
+                <button type="button" onClick={() => openResult(entry)} className="flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-primary hover:bg-overlay/5">
                   {entry.heading}
                   {entry.section && <span className="text-xs text-muted">{SETTINGS_SECTION_TITLES[entry.section]}</span>}
                 </button>
@@ -182,22 +183,7 @@ export function SettingsPage() {
         {openSections.has('general') && <SettingsSectionPanel id="general">
       <section className="card-padded max-w-md">
         <h3 className="text-sm font-semibold text-primary mb-3">Appearance</h3>
-        <div className="flex rounded-md border border-subtle overflow-hidden w-fit text-sm">
-          <button
-            onClick={() => setTheme('dark')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${theme === 'dark' ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
-          >
-            <Moon size={14} aria-hidden="true" />
-            Dark
-          </button>
-          <button
-            onClick={() => setTheme('light')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${theme === 'light' ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
-          >
-            <Sun size={14} aria-hidden="true" />
-            Light
-          </button>
-        </div>
+        <ThemePicker />
         <label className="mt-4 flex items-start gap-2 text-sm text-primary">
           <input type="checkbox" checked={notificationPopups} onChange={(event) => setNotificationPopups(event.target.checked)} className="mt-1" />
           <span>

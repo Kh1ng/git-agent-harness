@@ -79,7 +79,7 @@ export function LoginRepairPanel({ login }: { login: RepairableLogin }) {
       <p className="text-sm text-primary">Open the sign-in page{repair.code ? ' and enter this code' : ''}. This updates when you finish.</p>
       <ExternalAnchor href={repair.url} className="btn-primary inline-flex min-h-11 items-center text-xs">Open sign-in page</ExternalAnchor>
       {repair.code && <div className="flex flex-wrap items-center gap-2">
-        <code className="rounded bg-white/5 px-2 py-1 font-mono text-lg tracking-widest text-primary" aria-label="One-time code">{repair.code}</code>
+        <code className="rounded bg-overlay/5 px-2 py-1 font-mono text-lg tracking-widest text-primary" aria-label="One-time code">{repair.code}</code>
         <button type="button" className="btn-secondary min-h-11 text-xs" onClick={() => {
           void navigator.clipboard?.writeText(repair.code!).then(() => setCopied(true)).catch(() => undefined);
         }}>{copied ? 'Copied' : 'Copy code'}</button>

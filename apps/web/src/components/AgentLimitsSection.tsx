@@ -200,9 +200,9 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
       {invalid && <p role="alert" className="mt-2 text-xs text-critical">Limits must be whole numbers of at least 1. Leave an agent blank for no limit.</p>}
       {modelError && <p role="alert" className="mt-2 text-xs text-critical">{modelError}</p>}
       {saveError && <p className="mt-2 text-xs text-critical">Failed to save: {saveError}</p>}
-      {saved && !saveError && <p className="mt-2 text-xs text-green-600">Agent settings saved.</p>}
+      {saved && !saveError && <p className="mt-2 text-xs text-good">Agent settings saved.</p>}
       <button onClick={save} disabled={saving || invalid || modelError != null}
-        className="mt-3 inline-flex min-h-11 items-center gap-1.5 px-3 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">
+        className="btn-primary mt-3 min-h-11">
         {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         Save agent settings
       </button>

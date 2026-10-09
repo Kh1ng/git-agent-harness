@@ -148,13 +148,13 @@ export function ProfileEditor() {
       </div>
 
       {errorMessage && (
-        <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-md">
+        <div className="p-3 bg-critical/10 border border-critical/30 text-critical text-sm rounded-md">
           <AlertCircle size={14} className="inline mr-1" aria-hidden="true" />
           {errorMessage}
         </div>
       )}
       {showSuccess && (
-        <div className="p-3 bg-green-50 border border-green-200 text-green-700 text-sm rounded-md">
+        <div className="p-3 bg-good/10 border border-good/30 text-good text-sm rounded-md">
           <Check size={14} className="inline mr-1" aria-hidden="true" />
           {successMessage}
         </div>
@@ -338,7 +338,7 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         <button
           type="button"
           onClick={onCancel}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-raised border border-subtle rounded-md text-sm text-secondary hover:bg-white/5"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-raised border border-subtle rounded-md text-sm text-secondary hover:bg-overlay/5"
         >
           <X size={14} aria-hidden="true" />
           Cancel
@@ -384,14 +384,14 @@ function ProfileListComponent({ profileList, isLoading, onEdit, onDelete }: Prof
           <div className="flex gap-1">
             <button
               onClick={() => onEdit(profile)}
-              className="p-1.5 text-muted hover:text-primary hover:bg-white/5 rounded-md"
+              className="p-1.5 text-muted hover:text-primary hover:bg-overlay/5 rounded-md"
               title="Edit profile"
             >
               <Pencil size={14} aria-hidden="true" />
             </button>
             <button
               onClick={() => onDelete(profile.name)}
-              className="p-1.5 text-muted hover:text-red-500 hover:bg-red-50/10 rounded-md"
+              className="p-1.5 text-muted hover:text-critical hover:bg-critical/10 rounded-md"
               title="Delete profile"
             >
               <Trash2 size={14} aria-hidden="true" />
@@ -425,7 +425,7 @@ function DeleteModal({ profileName, isLoading, onCancel, onConfirm }: DeleteModa
 
   return (
     <dialog ref={dialog} onClose={onCancel} aria-labelledby={titleId} aria-describedby={descriptionId}
-      className="session-dialog bg-raised border border-subtle rounded-lg p-6 max-w-md text-primary backdrop:bg-black/50">
+      className="session-dialog bg-raised border border-subtle rounded-lg p-6 max-w-md text-primary backdrop:bg-scrim/50">
       <h3 id={titleId} className="text-lg font-semibold text-primary mb-2">Delete Profile</h3>
       <p id={descriptionId} className="text-sm text-secondary mb-4">
         Are you sure you want to delete the profile <strong>{profileName}</strong>?
@@ -444,7 +444,7 @@ function DeleteModal({ profileName, isLoading, onCancel, onConfirm }: DeleteModa
         <button
           onClick={onConfirm}
           disabled={isLoading}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-md text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="btn-danger"
         >
           <Trash2 size={14} aria-hidden="true" />
           {isLoading ? 'Deleting...' : 'Delete Profile'}

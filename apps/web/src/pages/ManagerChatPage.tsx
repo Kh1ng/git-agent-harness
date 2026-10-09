@@ -141,7 +141,7 @@ function ToolCallCard({ tool }: { tool: NonNullable<ChatTurn['tool']> }) {
   const statusColor = tool.status === 'failed'
     ? 'text-critical'
     : tool.status === 'completed'
-      ? 'text-emerald-400'
+      ? 'text-good'
       : 'text-muted animate-pulse';
   const statusLabel = tool.status === 'pending' || tool.status === 'completed' ? tool.status : tool.status;
   return (
@@ -149,7 +149,7 @@ function ToolCallCard({ tool }: { tool: NonNullable<ChatTurn['tool']> }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white/5"
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-overlay/5"
         aria-expanded={open}
       >
         <Wrench size={12} className="text-muted shrink-0" aria-hidden="true" />
@@ -202,7 +202,7 @@ function SkillPicker({
   return (
     <details className="group static sm:relative">
       <summary
-        className="touch-target flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0 [&::-webkit-details-marker]:hidden"
+        className="touch-target flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-overlay/5 sm:min-h-0 sm:min-w-0 [&::-webkit-details-marker]:hidden"
         aria-label="Skills"
         onClick={(event) => { if (busy) event.preventDefault(); }}
         title={busy ? 'Skill changes are disabled while a turn is in flight' : 'Choose the skills applied to the next turn'}
@@ -234,7 +234,7 @@ function SkillPicker({
         ) : (
           <div className="space-y-1">
             {binding.skills.map((skill) => (
-              <label key={skill.id} className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-white/5">
+              <label key={skill.id} className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-overlay/5">
                 <input
                   type="checkbox"
                   checked={selected.has(skill.id)}
@@ -381,8 +381,8 @@ function GitStrip({
           {prs.length > 0 && (
             <>
               <span className="text-muted">|</span>
-              <GitPullRequest size={13} className="text-purple-400 shrink-0" />
-              <GitStripEntries items={prs} className="text-purple-300" />
+              <GitPullRequest size={13} className="text-series-5 shrink-0" />
+              <GitStripEntries items={prs} className="text-series-5" />
             </>
           )}
           {issues.length > 0 && (
@@ -1534,7 +1534,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
         )}
         {gitStatus && (
           <button type="button" onClick={() => setToolsOpen(true)}
-            className="touch-target inline-flex min-h-11 min-w-11 max-w-[16rem] shrink-0 items-center justify-center gap-1.5 rounded-md border border-subtle px-2 py-1 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0"
+            className="touch-target inline-flex min-h-11 min-w-11 max-w-[16rem] shrink-0 items-center justify-center gap-1.5 rounded-md border border-subtle px-2 py-1 text-xs text-secondary hover:bg-overlay/5 sm:min-h-0 sm:min-w-0"
             aria-label={`Git status for ${gitStatus.branch}: ${gitStatus.readOnly ? 'read only' : `${gitStatus.changes.length} changed ${gitStatus.changes.length === 1 ? 'file' : 'files'}`}. Open chat tools for details.`}
             title="Git status — open chat tools for details">
             <GitBranch size={13} className="shrink-0 text-muted" aria-hidden="true" />
@@ -1701,7 +1701,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
                 const item = storageBySession.get(session.id);
                 const candidate = storage?.candidates.find((entry) => entry.sessionId === session.id);
                 return (
-                  <label key={session.id} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-xs hover:bg-white/5">
+                  <label key={session.id} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-xs hover:bg-overlay/5">
                     <input
                       type="checkbox"
                       checked={selectedSessionIds.has(session.id)}
@@ -1786,7 +1786,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
               {preview && safePreviewUrl(preview.url) !== null && (
                 <ExternalAnchor
                   href={safePreviewUrl(preview.url) ?? undefined}
-                  className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                  className="rounded p-1 text-muted hover:bg-overlay/5 hover:text-primary"
                   title="Open preview"
                 >
                   <ExternalLink size={13} aria-hidden="true" />
@@ -1794,7 +1794,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
               )}
               <button
                 onClick={() => setPreviewOpen(false)}
-                className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                className="rounded p-1 text-muted hover:bg-overlay/5 hover:text-primary"
                 aria-label="Close preview"
               >
                 <X size={14} aria-hidden="true" />
@@ -1951,7 +1951,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
                     className={
                       opt.kind.startsWith('allow')
                         ? 'btn-primary text-xs'
-                        : 'bg-raised border border-subtle rounded-md px-2.5 py-1 text-xs text-secondary hover:bg-white/5'
+                        : 'bg-raised border border-subtle rounded-md px-2.5 py-1 text-xs text-secondary hover:bg-overlay/5'
                     }
                   >
                     {opt.name}
@@ -1987,7 +1987,7 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
                   onClick={() => applyPaletteSelection(cmd)}
                   onMouseEnter={() => setPaletteIndex(i)}
                   className={`w-full text-left px-3 py-1.5 text-xs flex items-baseline gap-2 ${
-                    i === paletteIndex ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'
+                    i === paletteIndex ? 'bg-accent-fill text-on-fill' : 'text-secondary hover:bg-overlay/5'
                   }`}
                 >
                   <span className="font-mono shrink-0">/{cmd.name}</span>

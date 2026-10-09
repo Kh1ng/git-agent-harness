@@ -127,7 +127,7 @@ function NavMenu({ group, currentPage, onSelect }: { group: NavGroup; currentPag
             const current = currentPage === tab.id;
             return (
               <button key={tab.id} type="button" role="menuitem" aria-current={current ? 'page' : undefined} onClick={() => { setAt(null); onSelect(tab.id); }}
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-white/5 ${current ? 'text-primary' : 'text-secondary'}`}>
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-overlay/5 ${current ? 'text-primary' : 'text-secondary'}`}>
                 <TabIcon size={14} className={current ? 'text-accent' : 'text-muted'} aria-hidden="true" />
                 {tab.label}
               </button>
@@ -277,7 +277,7 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
             setDrawerOpen(false);
           }
         }}
-        className="mobile-drawer m-0 h-dvh max-h-none w-72 max-w-[85vw] bg-card text-primary border-0 border-r border-subtle px-3 backdrop:bg-black/60"
+        className="mobile-drawer m-0 h-dvh max-h-none w-72 max-w-[85vw] bg-card text-primary border-0 border-r border-subtle px-3 backdrop:bg-scrim/60"
       >
         <div className="flex items-center justify-between px-2 py-3 mb-2">
           <div>

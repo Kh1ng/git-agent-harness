@@ -2,7 +2,8 @@ import plugin from 'tailwindcss/plugin';
 
 /** @type {import('tailwindcss').Config} */
 export default {
-  darkMode: ['selector', '[data-theme="dark"]'],
+  // `dark:` follows the theme's scheme (src/lib/themes.ts), not its id, so every dark theme gets it.
+  darkMode: ['selector', '[data-scheme="dark"]'],
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -18,8 +19,14 @@ export default {
         secondary: 'rgb(var(--ink-secondary) / <alpha-value>)',
         muted: 'rgb(var(--ink-muted) / <alpha-value>)',
         accent: 'rgb(var(--accent) / <alpha-value>)',
-        // Fill behind white text (4.5:1 in both themes); `accent` alone is for text and outlines.
+        // Solid fills; text on them is `on-fill` (4.5:1 in every theme). `accent` alone is for text and outlines.
         'accent-fill': 'rgb(var(--accent-fill) / <alpha-value>)',
+        'critical-fill': 'rgb(var(--critical-fill) / <alpha-value>)',
+        'on-fill': 'rgb(var(--on-fill) / <alpha-value>)',
+        // Tint for hover, pressed and track states, used at low alpha (bg-overlay/5): lightens a dark theme, darkens a light one.
+        overlay: 'rgb(var(--overlay) / <alpha-value>)',
+        // Modal backdrop.
+        scrim: 'rgb(var(--scrim) / <alpha-value>)',
         good: 'rgb(var(--status-good) / <alpha-value>)',
         warning: 'rgb(var(--status-warning) / <alpha-value>)',
         serious: 'rgb(var(--status-serious) / <alpha-value>)',

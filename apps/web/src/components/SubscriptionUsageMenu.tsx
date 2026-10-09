@@ -20,7 +20,7 @@ export function UsageWindowRow({ window, now, compact = false }: { window: Usage
           <span className={window.usedPercent === null ? '' : 'text-primary'}>{window.usedPercent === null ? 'no data' : `${Math.round(window.usedPercent)}%`}</span>
         </span>
       </div>
-      <div className={`mt-1 overflow-hidden rounded-[3px] bg-white/10 ${compact ? 'h-[3px]' : 'h-[4px]'}`} role="progressbar" aria-labelledby={id}
+      <div className={`mt-1 overflow-hidden rounded-[3px] bg-overlay/10 ${compact ? 'h-[3px]' : 'h-[4px]'}`} role="progressbar" aria-labelledby={id}
         aria-valuenow={window.usedPercent === null ? undefined : Math.round(window.usedPercent)} aria-valuemin={0} aria-valuemax={100}>
         {window.usedPercent !== null && <div className={`h-full ${BAR_CLASS[tone]} transition-[width]`} style={{ width: `${window.usedPercent}%` }} />}
       </div>
@@ -49,7 +49,7 @@ export function SubscriptionDetail({ usage, now }: { usage: SubscriptionUsage; n
         </div>
       </div>
       {tight && tight.usedPercent !== null ? (
-        <p className="rounded bg-white/5 px-2 py-1 text-xs text-primary">
+        <p className="rounded bg-overlay/5 px-2 py-1 text-xs text-primary">
           <span className="font-medium">{Math.round(tight.usedPercent)}% of {tight.label.toLowerCase()} used.</span>
           {until && <> Resets in {until}.</>}
           {usage.windows.length > 1 && <span className="block text-muted">That is the tightest limit right now.</span>}
@@ -104,7 +104,7 @@ export function SubscriptionUsageMenu({ subscriptions, busy, onOpenQuota }: { su
             <button key={usage.id} type="button" aria-label={label} aria-expanded={openId === usage.id} aria-haspopup="true"
               onMouseEnter={() => { if (!pinned) { setOpenId(usage.id); setNow(Date.now()); } }}
               onClick={() => { setPinned(openId !== usage.id || !pinned); setOpenId(usage.id); setNow(Date.now()); }}
-              className={`flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/5 ${openId === usage.id ? 'bg-white/5' : ''}`}>
+              className={`flex h-9 w-9 items-center justify-center rounded-md hover:bg-overlay/5 ${openId === usage.id ? 'bg-overlay/5' : ''}`}>
               <UsageRing usage={usage} working={working} />
             </button>
           );

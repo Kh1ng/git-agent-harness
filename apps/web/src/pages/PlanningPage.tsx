@@ -287,7 +287,7 @@ function FrontierList({ map, selected, onSelect }: { map: PlanningMap; selected:
           {frontier.map((node) => (
             <li key={node.number}>
               <button type="button" onClick={() => onSelect(node.number)} aria-current={node.number === selected ? 'true' : undefined}
-                className={`w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/5 ${node.number === selected ? 'bg-white/5' : ''}`}>
+                className={`w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-overlay/5 ${node.number === selected ? 'bg-overlay/5' : ''}`}>
                 <span className="font-medium text-accent">{nodeName(map, node.number)}</span> <span className="text-primary">{node.title}</span>
               </button>
             </li>

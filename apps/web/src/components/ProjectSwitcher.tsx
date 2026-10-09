@@ -47,7 +47,7 @@ export function ProjectSwitcher({ onImport, onCreate }: { onImport: () => void; 
   return (
     <div className="relative shrink-0" ref={menu}>
       <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} aria-haspopup="menu"
-        className="flex max-w-[16rem] items-center gap-1.5 rounded-md px-2 py-1.5 text-sm hover:bg-white/5" title={selected?.repo ?? label}>
+        className="flex max-w-[16rem] items-center gap-1.5 rounded-md px-2 py-1.5 text-sm hover:bg-overlay/5" title={selected?.repo ?? label}>
         <FolderGit2 size={15} className="shrink-0 text-accent" aria-hidden="true" />
         <span className="truncate"><span className="text-muted">Project: </span><span className="font-semibold text-primary">{label}</span></span>
         <ChevronDown size={14} className="shrink-0 text-muted" aria-hidden="true" />
@@ -62,7 +62,7 @@ export function ProjectSwitcher({ onImport, onCreate }: { onImport: () => void; 
               const active = candidate.name === selectedName;
               return (
                 <button key={candidate.name} type="button" role="menuitemradio" aria-checked={active} onClick={() => choose(candidate.name)}
-                  className={`flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-white/5 ${active ? 'bg-accent/10' : ''}`}>
+                  className={`flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-overlay/5 ${active ? 'bg-accent/10' : ''}`}>
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center">{active && <Check size={14} className="text-accent" aria-hidden="true" />}</span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm text-primary">{candidate.display_name || candidate.name}</span>

@@ -590,7 +590,7 @@ function ModelList({ models }: { models: CliRouterSnapshot['models'] }) {
           return (
             <div
               key={m.id}
-              className="flex items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-xs text-secondary hover:bg-white/5 group"
+              className="flex items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-xs text-secondary hover:bg-overlay/5 group"
             >
               <div className="min-w-0">
                 <span className="font-mono text-primary truncate block">{gahId}</span>

@@ -16,7 +16,7 @@ function ActivityRow({ run }: { run: ControllerActivity }) {
 
   return (
     <details className="group">
-      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3 hover:bg-white/5 [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3 hover:bg-overlay/5 [&::-webkit-details-marker]:hidden">
         <div className="flex min-w-0 flex-1 items-start gap-2">
           {run.status === 'running'
             ? <Clock3 size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
@@ -87,7 +87,7 @@ export function ControllerActivityCard({ activity }: { activity: ControllerActiv
         <p className="text-sm text-muted">No controller runs in the last 24 hours.</p>
       ) : recent.length > 0 && (
         <details className={`group card overflow-hidden ${active.length > 0 ? 'mt-3' : ''}`}>
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm text-secondary hover:bg-white/5 hover:text-primary [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm text-secondary hover:bg-overlay/5 hover:text-primary [&::-webkit-details-marker]:hidden">
             <span className="flex items-center gap-2 font-medium">
               <ChevronRight size={14} className="transition-transform group-open:rotate-90" aria-hidden="true" />
               Recent history

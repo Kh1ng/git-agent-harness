@@ -43,7 +43,7 @@ function EventRow({ event }: { event: FactoryRunEvent }) {
             {event.status === 'running' ? 'running' : event.status === 'failed' ? `failed${event.exit_code != null ? ` (${event.exit_code})` : ''}` : 'done'}
           </span>
         </summary>
-        {event.output && <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all border-t border-subtle bg-black/20 px-2 py-1.5 font-mono text-[11px] text-secondary">{event.output}</pre>}
+        {event.output && <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all border-t border-subtle bg-page px-2 py-1.5 font-mono text-[11px] text-secondary">{event.output}</pre>}
       </details>
     </li>
   );
@@ -156,7 +156,7 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
             const active = run.runId === runId;
             return (
               <button key={run.runId} type="button" onClick={() => onSelectRun(run)} aria-current={active ? 'true' : undefined}
-                className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs ${active ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-white/5'}`}>
+                className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs ${active ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-overlay/5'}`}>
                 <span className="h-1.5 w-1.5 rounded-full bg-good" aria-hidden="true" />
                 {run.title}
               </button>

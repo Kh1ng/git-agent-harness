@@ -36,7 +36,7 @@ export function WorkingNowMenu({ jobs, agents, onOpenBoard }: { jobs: WorkingJob
         aria-label={first ? `${summary}: ${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'} running` : 'No job is running'}
         onMouseEnter={() => { if (!pinned) { setOpen(true); setNow(Date.now()); } }}
         onClick={() => { setPinned(!open || !pinned); setOpen(true); setNow(Date.now()); }}
-        className={`flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-xs hover:bg-white/5 ${open ? 'bg-white/5' : ''} ${first ? 'text-primary' : 'text-muted'}`}>
+        className={`flex h-9 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-xs hover:bg-overlay/5 ${open ? 'bg-overlay/5' : ''} ${first ? 'text-primary' : 'text-muted'}`}>
         <span className={`h-2 w-2 shrink-0 rounded-full ${first ? 'animate-pulse bg-good' : 'bg-muted'}`} aria-hidden="true" />
         {summary}
       </button>
