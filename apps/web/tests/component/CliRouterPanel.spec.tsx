@@ -173,6 +173,8 @@ test('connection form saves settings and clears password fields', async ({ mount
   let savedPayload: Record<string, unknown> | null = null;
   await page.route('**/api/cli-router/settings', (route) => {
     if (route.request().method() === 'PUT') {
+      // The server's mutation guard rejects writes without an Idempotency-Key.
+      if (!route.request().headers()['idempotency-key']) return route.fulfill({ status: 400, json: { message: 'idempotency_key_required' } });
       savedPayload = route.request().postDataJSON();
       return route.fulfill({ json: makeSnapshot() });
     }

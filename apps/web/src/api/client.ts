@@ -449,7 +449,7 @@ async function patchJson<T, U>(path: string, body: U): Promise<T> {
   const url = new URL(path, SERVER_URL);
   const res = await fetch(url.toString(), {
     method: 'PATCH',
-    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    headers: mutationHeaders(),
     body: JSON.stringify(body)
   });
   if (!res.ok) {
@@ -469,7 +469,7 @@ async function putJson<T, U>(path: string, body: U): Promise<T> {
   const url = new URL(path, SERVER_URL);
   const res = await fetch(url.toString(), {
     method: 'PUT',
-    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    headers: mutationHeaders(),
     body: JSON.stringify(body)
   });
   if (!res.ok) {
@@ -632,15 +632,15 @@ export const gahApi: GahDataSource = {
   async ledgerClearAttempts(params) {
     return postJson('/api/ledger/clear-attempts', {
       profile: params.profile,
-      work_id: params.work_id,
-      ...(params.dry_run === undefined ? {} : { dry_run: params.dry_run }),
+      workId: params.work_id,
+      ...(params.dry_run === undefined ? {} : { dryRun: params.dry_run }),
     });
   },
 
   async holdSet(params) {
     return postJson('/api/hold/set', {
       profile: params.profile,
-      work_id: params.work_id,
+      workId: params.work_id,
       ...(params.reason === undefined ? {} : { reason: params.reason }),
     });
   },
@@ -648,7 +648,7 @@ export const gahApi: GahDataSource = {
   async holdClear(params) {
     return postJson('/api/hold/clear', {
       profile: params.profile,
-      work_id: params.work_id,
+      workId: params.work_id,
     });
   },
 

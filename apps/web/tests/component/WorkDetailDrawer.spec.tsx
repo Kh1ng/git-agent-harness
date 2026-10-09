@@ -41,9 +41,16 @@ function status(held = false): StatusSnapshot {
 async function routes(page: import('@playwright/test').Page) {
   await page.route('**/api/work/**', (route) => route.fulfill({ json: [entry] }));
   await page.route('**/api/profiles', (route) => route.fulfill({ json: [{ name: 'fixture', repo: 'Kh1ng/git-agent-harness' }] }));
-  await page.route('**/api/hold/set', (route) => route.fulfill({ json: { success: true } }));
-  await page.route('**/api/hold/clear', (route) => route.fulfill({ json: { success: true } }));
-  await page.route('**/api/ledger/clear-attempts', (route) => route.fulfill({ json: { success: true } }));
+  // Mirror the server's contract: these routes read `workId` and require an Idempotency-Key.
+  const mutation = (route: import('@playwright/test').Route) => {
+    const request = route.request();
+    if (typeof request.postDataJSON()?.workId !== 'string') return route.fulfill({ status: 400, json: { message: 'workId is required' } });
+    if (!request.headers()['idempotency-key']) return route.fulfill({ status: 400, json: { message: 'idempotency_key_required' } });
+    return route.fulfill({ json: { success: true } });
+  };
+  await page.route('**/api/hold/set', mutation);
+  await page.route('**/api/hold/clear', mutation);
+  await page.route('**/api/ledger/clear-attempts', mutation);
   await page.route('**/api/git/review**', (route) => route.fulfill({ json: {
     ownerNodeId: 'local', ownerNodeName: 'Local node', provider: 'github', providerLabel: 'pull request', branch: 'feat/42', base: 'main', upstream: 'origin/feat/42',
     ahead: 0, behind: 0, files: [], commits: [{ hash: 'abcdef1', short: 'abcdef1', subject: 'Drawer work' }], changedFiles: ['README.md'], patch: '',

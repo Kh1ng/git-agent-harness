@@ -454,6 +454,19 @@ pub fn extract_telemetry_records(
     all_records
 }
 
+/// Whether a ledger `validation_result` counts as a pass. Dispatch writes
+/// `"passed"` (and review attempts `"APPROVE"`), matching `ledger::summary`;
+/// `"pass"` is accepted for older records.
+pub(crate) fn validation_passed(result: Option<&str>) -> bool {
+    matches!(result, Some("passed" | "pass" | "APPROVE"))
+}
+
+/// Whether a ledger `validation_result` counts as a failure. Dispatch writes
+/// `"failed"`; `"fail"` is accepted for older records.
+pub(crate) fn validation_failed(result: Option<&str>) -> bool {
+    matches!(result, Some("failed" | "fail"))
+}
+
 /// Determine final outcome from ledger entry data
 pub fn determine_final_outcome(entry: &LedgerEntry) -> Option<String> {
     if entry.review_verdict.as_deref() == Some("APPROVE") {
@@ -468,10 +481,10 @@ pub fn determine_final_outcome(entry: &LedgerEntry) -> Option<String> {
     if entry.commit_created && entry.push_succeeded {
         return Some("COMMITTED".to_string());
     }
-    if entry.validation_result.as_deref() == Some("pass") {
+    if validation_passed(entry.validation_result.as_deref()) {
         return Some("VALIDATION_PASSED".to_string());
     }
-    if entry.failure_class.as_deref() == Some("HumanBlocked") {
+    if entry.failure_class.as_deref() == Some(crate::ledger::FailureClass::HumanBlocked.as_str()) {
         return Some("HUMAN_BLOCKED".to_string());
     }
     if entry.failure_class.is_some() {

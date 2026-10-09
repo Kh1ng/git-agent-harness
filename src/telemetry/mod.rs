@@ -17,6 +17,7 @@ pub mod records;
 use crate::config::GahConfig;
 use crate::ledger::{read_entries, LedgerEntry, LedgerUsage};
 use anyhow::Result;
+use extractor::{validation_failed, validation_passed};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
@@ -517,7 +518,7 @@ fn aggregate_by_dimension(
 
         if entry.attempts.is_empty() {
             if matches_filters(entry, None, params) {
-                let is_failed = entry.validation_result.as_deref() == Some("fail")
+                let is_failed = validation_failed(entry.validation_result.as_deref())
                     || entry.failure_class.is_some()
                     || (entry.backend_exit_code.is_some() && entry.backend_exit_code != Some(0));
 
@@ -539,7 +540,7 @@ fn aggregate_by_dimension(
                 }
                 builder.data.attempts += 1;
 
-                if entry.validation_result.as_deref() == Some("pass") {
+                if validation_passed(entry.validation_result.as_deref()) {
                     builder.data.successful_attempts += 1;
                 } else if is_failed {
                     builder.data.failed_attempts += 1;
@@ -591,7 +592,7 @@ fn aggregate_by_dimension(
             for (i, attempt) in entry.attempts.iter().enumerate() {
                 if matches_filters(entry, Some(attempt), params) {
                     let is_retried = i < entry.attempts.len() - 1;
-                    let is_failed = attempt.validation_result.as_deref() == Some("fail")
+                    let is_failed = validation_failed(attempt.validation_result.as_deref())
                         || attempt.failure_class.is_some()
                         || (attempt.exit_code.is_some() && attempt.exit_code != Some(0));
 
@@ -617,7 +618,7 @@ fn aggregate_by_dimension(
                     }
                     builder.data.attempts += 1;
 
-                    if attempt.validation_result.as_deref() == Some("pass") {
+                    if validation_passed(attempt.validation_result.as_deref()) {
                         builder.data.successful_attempts += 1;
                     } else if is_failed || is_retried {
                         builder.data.failed_attempts += 1;
@@ -922,7 +923,7 @@ fn calculate_totals(
 
         if entry.attempts.is_empty() {
             if matches_filters(entry, None, params) {
-                let is_failed = entry.validation_result.as_deref() == Some("fail")
+                let is_failed = validation_failed(entry.validation_result.as_deref())
                     || entry.failure_class.is_some()
                     || (entry.backend_exit_code.is_some() && entry.backend_exit_code != Some(0));
 
@@ -933,7 +934,7 @@ fn calculate_totals(
                 entry_matched = true;
                 total_attempts += 1;
 
-                if entry.validation_result.as_deref() == Some("pass") {
+                if validation_passed(entry.validation_result.as_deref()) {
                     successful_attempts += 1;
                 } else if is_failed {
                     failed_attempts += 1;
@@ -952,7 +953,7 @@ fn calculate_totals(
             for (i, attempt) in entry.attempts.iter().enumerate() {
                 if matches_filters(entry, Some(attempt), params) {
                     let is_retried = i < entry.attempts.len() - 1;
-                    let is_failed = attempt.validation_result.as_deref() == Some("fail")
+                    let is_failed = validation_failed(attempt.validation_result.as_deref())
                         || attempt.failure_class.is_some()
                         || (attempt.exit_code.is_some() && attempt.exit_code != Some(0));
 
@@ -966,7 +967,7 @@ fn calculate_totals(
                     entry_matched = true;
                     total_attempts += 1;
 
-                    if attempt.validation_result.as_deref() == Some("pass") {
+                    if validation_passed(attempt.validation_result.as_deref()) {
                         successful_attempts += 1;
                     } else if is_failed || is_retried {
                         failed_attempts += 1;
