@@ -655,6 +655,22 @@ pub(crate) mod telemetry_tests {
         let outcome = determine_final_outcome(&entry);
         assert_eq!(outcome, Some("VALIDATION_PASSED".to_string()));
 
+        // Dispatch records a pass as "passed"; "pass" above is the legacy spelling.
+        entry.validation_result = Some("passed".to_string());
+        let outcome = determine_final_outcome(&entry);
+        assert_eq!(outcome, Some("VALIDATION_PASSED".to_string()));
+
+        // FailureClass is stored in its snake_case wire form.
+        entry.validation_result = None;
+        entry.failure_class = Some(
+            crate::ledger::FailureClass::HumanBlocked
+                .as_str()
+                .to_string(),
+        );
+        let outcome = determine_final_outcome(&entry);
+        assert_eq!(outcome, Some("HUMAN_BLOCKED".to_string()));
+        entry.failure_class = None;
+
         // Test success
         entry.validation_result = None;
         entry.backend_exit_code = Some(0);
