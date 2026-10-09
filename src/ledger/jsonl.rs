@@ -131,11 +131,12 @@ pub fn active_review_hold_work_ids_from_entries(
 }
 
 fn append_locked(path: &Path, entry: &LedgerEntry) -> Result<()> {
-    if let Some(offset) = truncated_tail_offset(&fs::read(path).unwrap_or_default()) {
+    let tail = final_record(path)?;
+    if let Some(offset) = truncated_tail_offset(&tail.bytes) {
         anyhow::bail!(
             "ledger {} has an unterminated invalid final record at byte {}; run `gah ledger repair-tail` before appending",
             path.display(),
-            offset
+            tail.start + offset as u64
         );
     }
 
@@ -147,9 +148,81 @@ fn append_locked(path: &Path, entry: &LedgerEntry) -> Result<()> {
     let normalized = entry.normalized_for_persistence();
     let mut value = serde_json::to_value(&normalized).context("serializing ledger entry")?;
     crate::redact::redact_json_value(&mut value);
-    serde_json::to_writer(&mut file, &value).context("serializing ledger entry")?;
-    file.write_all(b"\n").context("writing ledger newline")?;
+    // One write per record: a record split across writes can be torn by a
+    // kill or ENOSPC between them. A complete final record whose newline was
+    // lost is framed first, so the new record never joins its line.
+    let mut record = Vec::new();
+    if !tail.bytes.is_empty() && !tail.bytes.ends_with(b"\n") {
+        record.push(b'\n');
+    }
+    serde_json::to_writer(&mut record, &value).context("serializing ledger entry")?;
+    record.push(b'\n');
+    file.write_all(&record).context("writing ledger record")?;
     Ok(())
+}
+
+/// The ledger's final record (everything after its last newline, or the
+/// final newline-terminated line's last byte), read from the end so an
+/// append does not re-read the whole ledger.
+struct FinalRecord {
+    start: u64,
+    bytes: Vec<u8>,
+}
+
+fn final_record(path: &Path) -> Result<FinalRecord> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FinalRecord {
+                start: 0,
+                bytes: Vec::new(),
+            })
+        }
+        Err(err) => return Err(err).with_context(|| format!("reading ledger {}", path.display())),
+    };
+    let len = file.metadata()?.len();
+    let mut start = len;
+    // Chunks are collected newest-first and joined once, so a long final
+    // record costs one copy, not one per chunk.
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    const CHUNK: u64 = 64 * 1024;
+    while start > 0 {
+        let read_from = start.saturating_sub(CHUNK);
+        let mut chunk = vec![0; (start - read_from) as usize];
+        file.seek(SeekFrom::Start(read_from))?;
+        file.read_exact(&mut chunk)?;
+        start = read_from;
+        // The byte that ends the previous record is enough context: a final
+        // newline means the tail is framed, otherwise the record runs back
+        // to the previous newline.
+        let is_tail = chunks.is_empty();
+        let search_end = if is_tail {
+            chunk.len().saturating_sub(1)
+        } else {
+            chunk.len()
+        };
+        let boundary = (is_tail && chunk.ends_with(b"\n")) || chunk[..search_end].contains(&b'\n');
+        chunks.push(chunk);
+        if boundary {
+            break;
+        }
+    }
+    let mut bytes: Vec<u8> = Vec::with_capacity(chunks.iter().map(Vec::len).sum());
+    for chunk in chunks.iter().rev() {
+        bytes.extend_from_slice(chunk);
+    }
+    if bytes.ends_with(b"\n") {
+        return Ok(FinalRecord {
+            start: len - 1,
+            bytes: b"\n".to_vec(),
+        });
+    }
+    if let Some(idx) = bytes.iter().rposition(|byte| *byte == b'\n') {
+        bytes.drain(..=idx);
+        start += idx as u64 + 1;
+    }
+    Ok(FinalRecord { start, bytes })
 }
 
 fn sync_mirror(cfg: &GahConfig) {
@@ -619,6 +692,60 @@ mod tests {
         let backup = repaired.backup_path.expect("torn tail must be backed up");
         assert_eq!(fs::read(&backup).unwrap(), torn_tail);
         assert_eq!(fs::read(&path).unwrap(), valid_prefix);
+    }
+
+    fn sample_entry() -> crate::ledger::LedgerEntry {
+        crate::ledger::LedgerEntry::new(
+            "test",
+            &ledger_tests::profile(),
+            "claude",
+            "pm",
+            "hello",
+            Some("123".into()),
+            None,
+        )
+    }
+
+    #[test]
+    fn append_frames_a_complete_final_record_that_lost_its_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        // A kill between the record and its newline used to leave this tail;
+        // the next append then joined two records on one unparseable line.
+        fs::write(&path, b"{\"record\":1}\n{\"record\":2}").unwrap();
+        super::append_locked(&path, &sample_entry()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[1], "{\"record\":2}");
+        for line in lines {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn append_still_refuses_a_torn_final_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        fs::write(&path, b"{\"record\":1}\n{\"rec").unwrap();
+        let err = super::append_locked(&path, &sample_entry()).unwrap_err();
+        assert!(format!("{err:#}").contains("at byte 13"), "{err:#}");
+    }
+
+    #[test]
+    fn final_record_reads_across_chunk_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let long = format!("{{\"pad\":\"{}\"}}", "x".repeat(200_000));
+        fs::write(&path, format!("{{\"a\":1}}\n{long}")).unwrap();
+        let tail = super::final_record(&path).unwrap();
+        assert_eq!(tail.start, 8);
+        assert_eq!(tail.bytes, long.as_bytes());
+        fs::write(&path, format!("{long}\n")).unwrap();
+        assert_eq!(super::final_record(&path).unwrap().bytes, b"\n");
+        let missing = super::final_record(&dir.path().join("absent")).unwrap();
+        assert!(missing.bytes.is_empty());
     }
 
     #[test]

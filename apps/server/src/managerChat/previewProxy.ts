@@ -21,6 +21,8 @@
 import http from 'node:http';
 import net from 'node:net';
 import { detectTailscaleIPv4 } from '../tailscaleDetect.js';
+import { isIP } from 'node:net';
+import { resolveBindHost } from '../bindHost.js';
 
 export interface PreviewInfo {
   profile: string;
@@ -44,6 +46,23 @@ export interface PreviewProxyOptions {
   maxPort?: number;
   /** Advertised host in preview URLs (tests override). */
   advertiseHost?: string;
+  /** Address preview listeners bind to. Defaults to the server's HOST, so an
+   * operator who binds the API to loopback does not get previews on 0.0.0.0. */
+  bindHost?: string;
+  /** Local ports a preview must never target (the control plane itself). */
+  protectedPorts?: number[];
+}
+
+export class PreviewTargetRefusedError extends Error {}
+
+/** Marks proxied traffic as forwarded. The control plane grants owner access
+ * to loopback requests without a token, and the proxy's upstream connection
+ * comes from loopback; an X-Forwarded-For header makes it refuse that trust
+ * for anything that reaches it through a preview port. */
+function forwardedFor(req: http.IncomingMessage): string {
+  const client = req.socket.remoteAddress ?? 'unknown';
+  const prior = req.headers['x-forwarded-for'];
+  return prior ? `${Array.isArray(prior) ? prior.join(', ') : prior}, ${client}` : client;
 }
 
 const DEFAULT_BASE_PORT = 41_000;
@@ -55,15 +74,50 @@ class PreviewProxy {
    * result in the same turn) must not each create a server -- the second
    * would leak (the existence check runs before the first registers). */
   private inflightSets = new Map<string, Promise<PreviewInfo>>();
-  private options: Required<Pick<PreviewProxyOptions, 'basePort' | 'maxPort'>> & { advertiseHost?: string } = {
+  private options: Required<Pick<PreviewProxyOptions, 'basePort' | 'maxPort' | 'protectedPorts'>> & {
+    advertiseHost?: string;
+    bindHost?: string;
+  } = {
     basePort: Number.parseInt(process.env.GAH_PREVIEW_BASE_PORT ?? '', 10) || DEFAULT_BASE_PORT,
-    maxPort: Number.parseInt(process.env.GAH_PREVIEW_MAX_PORT ?? '', 10) || DEFAULT_MAX_PORT
+    maxPort: Number.parseInt(process.env.GAH_PREVIEW_MAX_PORT ?? '', 10) || DEFAULT_MAX_PORT,
+    protectedPorts: [Number.parseInt(process.env.PORT ?? '', 10) || 3773]
   };
 
   configure(opts: PreviewProxyOptions): void {
     if (opts.basePort !== undefined) this.options.basePort = opts.basePort;
     if (opts.maxPort !== undefined) this.options.maxPort = opts.maxPort;
-    if (opts.advertiseHost !== undefined) this.options.advertiseHost = opts.advertiseHost;
+    if ('advertiseHost' in opts) this.options.advertiseHost = opts.advertiseHost;
+    if (opts.bindHost !== undefined) this.options.bindHost = opts.bindHost;
+    if (opts.protectedPorts !== undefined) this.options.protectedPorts = opts.protectedPorts;
+  }
+
+  /** A preview may point at a dev server, never at the control plane or at
+   * another preview listener (which would chain back to the same target). */
+  private assertTargetAllowed(devPort: number): void {
+    if (!Number.isInteger(devPort) || devPort < 1 || devPort > 65_535) {
+      throw new PreviewTargetRefusedError(`Invalid preview port ${devPort}.`);
+    }
+    if (this.options.protectedPorts.includes(devPort)) {
+      throw new PreviewTargetRefusedError(`Port ${devPort} is the control plane and cannot be previewed.`);
+    }
+    if (devPort >= this.options.basePort && devPort <= this.options.maxPort) {
+      throw new PreviewTargetRefusedError(`Port ${devPort} is in the preview listener range and cannot be previewed.`);
+    }
+  }
+
+  private bindHost(): string {
+    return this.options.bindHost ?? resolveBindHost();
+  }
+
+  /** A listener bound to one interface is only reachable at that address,
+   * so the advertised URL must use it; a wildcard bind keeps the Tailscale
+   * detection. */
+  private async defaultAdvertiseHost(): Promise<string> {
+    const bind = this.bindHost();
+    if (bind === '0.0.0.0' || bind === '::' || bind === '') {
+      return (await detectTailscaleIPv4()) ?? '127.0.0.1';
+    }
+    return isIP(bind) === 6 ? `[${bind}]` : bind;
   }
 
   get(profile: string, sessionId: string): PreviewInfo | null {
@@ -83,6 +137,7 @@ class PreviewProxy {
    * new port keeps the same preview URL; the proxy resolves the current
    * target per request. */
   async set(profile: string, sessionId: string, devPort: number): Promise<PreviewInfo> {
+    this.assertTargetAllowed(devPort);
     const key = `${profile}#${sessionId}`;
     // Serialize per key: a concurrent set waits for the in-flight one, then
     // just re-points the (now existing) entry instead of racing a second
@@ -118,7 +173,7 @@ class PreviewProxy {
     } as PreviewEntry;
     entry.server = this.createProxyServer(() => entry.devPort);
     const listenPort = await this.listenOnFreePort(entry.server);
-    const host = this.options.advertiseHost ?? (await detectTailscaleIPv4()) ?? '127.0.0.1';
+    const host = this.options.advertiseHost ?? (await this.defaultAdvertiseHost());
     entry.listenPort = listenPort;
     entry.url = `http://${host}:${listenPort}`;
     this.byKey.set(key, entry);
@@ -167,7 +222,7 @@ class PreviewProxy {
           port: devPort,
           method: req.method,
           path: req.url,
-          headers: { ...req.headers, host: `localhost:${devPort}` },
+          headers: { ...req.headers, host: `localhost:${devPort}`, 'x-forwarded-for': forwardedFor(req) },
           agent: false
         },
         (upstream) => {
@@ -191,12 +246,15 @@ class PreviewProxy {
         for (const [name, value] of Object.entries(req.headers)) {
           if (name === 'host') {
             lines.push(`host: localhost:${devPort}`);
+          } else if (name === 'x-forwarded-for') {
+            continue;
           } else if (Array.isArray(value)) {
             for (const v of value) lines.push(`${name}: ${v}`);
           } else if (value !== undefined) {
             lines.push(`${name}: ${value}`);
           }
         }
+        lines.push(`x-forwarded-for: ${forwardedFor(req)}`);
         upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
         if (head.length > 0) upstream.write(head);
         socket.pipe(upstream);
@@ -226,7 +284,7 @@ class PreviewProxy {
         }
         const port = candidates[index];
         server.once('error', () => tryNext(index + 1));
-        server.listen(port, '0.0.0.0', () => resolve(port));
+        server.listen(port, this.bindHost(), () => resolve(port));
       };
       tryNext(0);
     });

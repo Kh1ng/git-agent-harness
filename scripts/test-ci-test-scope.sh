@@ -19,6 +19,11 @@ check false true apps/desktop/main.rs
 check true true src/context.rs apps/desktop/main.rs
 check true true .github/workflows/CI.yml
 check true true scripts/ci-test-scope.sh
+check true false packages/contracts/src/fixtures/pm-plan-github.json
+check true false packages/contracts/src/cli-capabilities.manifest.json
+check true false packaging/systemd/gah-server.service
+check true false apps/server/src/paidRouteApprovals.test.ts
+check false false apps/server/src/server.ts
 check false false apps/web/src/pages/SettingsPage.tsx docs/README.md
 check false false
-printf 'CI suite selection: 10 cases passed\n'
+printf 'CI suite selection: 15 cases passed\n'

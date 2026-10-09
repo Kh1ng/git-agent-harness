@@ -22,6 +22,7 @@ import {
   validateBindHost
 } from './bindHost.js';
 import { startChatMaintenanceScheduler, stopChatMaintenanceScheduler } from './managerChat/chatMaintenance.js';
+import { previewProxy } from './managerChat/previewProxy.js';
 import { ActivityFeed } from './activityFeed.js';
 import { WebPushNotifications } from './webPush.js';
 import { apnsFromEnvironment } from './apns.js';
@@ -54,6 +55,9 @@ async function main() {
   }
 
   logLifecycle('Starting Git Agent Harness server...');
+  // Previews must never point back at the control plane, whatever port it
+  // ends up on; the proxy's own PORT parse is only a fallback.
+  previewProxy.configure({ protectedPorts: [PORT] });
   // Keys repaired from another device (#1272) apply to checks and backends.
   loadProviderKeys();
 

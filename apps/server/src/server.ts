@@ -109,6 +109,7 @@ import {
   startSeededChat,
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
+import { PreviewTargetRefusedError } from './managerChat/previewProxy.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { getSession, listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
@@ -2415,6 +2416,10 @@ export function createServer(
       const preview = await setManagerChatPreview(profile, sessionId, port);
       res.json({ preview });
     } catch (error) {
+      if (error instanceof PreviewTargetRefusedError) {
+        res.status(400).json({ error: 'Preview target refused', message: error.message });
+        return;
+      }
       res.status(502).json({
         error: 'Failed to set preview',
         message: error instanceof Error ? error.message : String(error)
@@ -2692,9 +2697,9 @@ export function createServer(
 
   app.get('/api/git/branches', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
     try {
+      const cwd = await resolveLocalPath(profile);
+      if (!cwd) return res.status(404).json({ error: 'Profile not found' });
       const result = await getGitBranchesCached(profile, cwd);
       res.json(result);
     } catch (error) {
@@ -2704,9 +2709,9 @@ export function createServer(
 
   app.get('/api/git/worktrees', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
     try {
+      const cwd = await resolveLocalPath(profile);
+      if (!cwd) return res.status(404).json({ error: 'Profile not found' });
       res.json(await getGitWorktreesCached(profile, cwd));
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
@@ -2716,9 +2721,9 @@ export function createServer(
   app.get('/api/git/log', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const limit = typeof req.query.limit === 'string' ? Math.min(50, parseInt(req.query.limit, 10) || 20) : 20;
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
     try {
+      const cwd = await resolveLocalPath(profile);
+      if (!cwd) return res.status(404).json({ error: 'Profile not found' });
       const result = await getGitLogCached(profile, cwd, limit);
       res.json(result);
     } catch (error) {
@@ -2743,7 +2748,12 @@ export function createServer(
       || (base !== undefined && (typeof base !== 'string' || !base.trim()))) {
       return res.status(400).json({ error: 'Invalid pull request fields' });
     }
-    const profileInfo = await resolveProfileInfo(profile);
+    let profileInfo: ProfileSummary | null;
+    try {
+      profileInfo = await resolveProfileInfo(profile);
+    } catch {
+      return res.status(502).json({ error: 'Could not read profiles' });
+    }
     if (!profileInfo?.local_path) return res.status(404).json({ error: 'Profile not found' });
     if (profileInfo.provider === 'gitlab') {
       try {
