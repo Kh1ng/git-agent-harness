@@ -108,6 +108,8 @@ pub enum PmCommands {
 pub enum Commands {
     /// Project memory retrieval, flush, deletion and migration.
     Memory(crate::cli::commands::memory::MemoryArgs),
+    /// Export a diagnostics bundle (memory timeline, host details) to send when debugging.
+    Diag(crate::cli::commands::diag::DiagArgs),
     /// Shared subscription routes, or classify and record a failed turn read from stdin.
     Route(crate::cli::commands::route::Args),
     /// The install scripts' file work (environment files, LaunchAgents, WSL).

@@ -9,6 +9,7 @@ pub mod claims;
 pub mod config;
 pub mod controller;
 pub mod credentials;
+pub mod diag;
 pub mod dispatch;
 pub mod doctor;
 pub mod external_approval;

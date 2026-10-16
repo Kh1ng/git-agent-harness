@@ -152,6 +152,7 @@ import { WorkerUpdateService } from './workerUpdate.js';
 import { WorkerUpdateBroker, WorkerUpdateError } from './workerUpdateBroker.js';
 import type { WebPushNotifications } from './webPush.js';
 import type { ApnsNotifications } from './apns.js';
+import { buildDiagnosticsBundle } from './diagnostics.js';
 import type { FleetUpdateResult, WorkerUpdateStatus } from '@git-agent-harness/contracts';
 
 const SERVER_VERSION = COORDINATOR_VERSION;
@@ -1269,6 +1270,19 @@ export function createServer(
     if (!limit || raw.length > limit || raw.trim() !== raw || /[\x00-\x1f\x7f]/.test(raw)) return undefined;
     return raw;
   };
+
+  app.get('/api/diagnostics/export', requireOwner, async (_req, res) => {
+    try {
+      const bundle = await buildDiagnosticsBundle(node.role);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      res.setHeader('Content-Type', 'application/gzip');
+      res.setHeader('Content-Disposition', `attachment; filename="parasaur-diagnostics-${stamp}.json.gz"`);
+      return res.send(bundle);
+    } catch (error) {
+      console.error('[diagnostics] export failed:', error);
+      return res.status(500).json({ error: 'diagnostics_export_failed', message: 'Could not build the diagnostics bundle.' });
+    }
+  });
 
   app.get('/api/telemetry/aggregate', async (req, res) => {
     const rawDimensions = req.query.dimensions;

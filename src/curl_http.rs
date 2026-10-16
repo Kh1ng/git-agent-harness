@@ -102,26 +102,42 @@ pub fn request_with_idempotency_key(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    split_status(output.stdout)
+}
+
+/// Splits curl's stdout into body and status on raw bytes, so binary bodies
+/// (a gzipped diagnostics bundle) arrive intact.
+fn split_status(mut stdout: Vec<u8>) -> Result<CurlResponse> {
     let marker = stdout
-        .rfind(STATUS_MARKER)
+        .windows(STATUS_MARKER.len())
+        .rposition(|window| window == STATUS_MARKER.as_bytes())
         .ok_or_else(|| anyhow::anyhow!("curl output missing status marker"))?;
+    let status = String::from_utf8_lossy(&stdout[marker + STATUS_MARKER.len()..])
+        .trim()
+        .parse()
+        .context("parsing HTTP status from curl output")?;
+    stdout.truncate(marker);
+    if stdout.last() == Some(&b'\n') {
+        stdout.pop();
+    }
     Ok(CurlResponse {
-        status: stdout[marker + STATUS_MARKER.len()..]
-            .trim()
-            .parse()
-            .context("parsing HTTP status from curl output")?,
-        body: stdout[..marker]
-            .strip_suffix('\n')
-            .unwrap_or(&stdout[..marker])
-            .as_bytes()
-            .to_vec(),
+        status,
+        body: stdout,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_bodies_survive_status_split() {
+        let mut stdout = vec![0x1f, 0x8b, 0xff, 0x00];
+        stdout.extend_from_slice(format!("\n{STATUS_MARKER}200\n").as_bytes());
+        let response = split_status(stdout).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, vec![0x1f, 0x8b, 0xff, 0x00]);
+    }
 
     #[test]
     fn curl_config_values_cannot_inject_directives() {

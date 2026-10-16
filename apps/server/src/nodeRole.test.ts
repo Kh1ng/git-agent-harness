@@ -43,6 +43,10 @@ test('worker role reports central identity and permits execution without hosting
       assert.equal((await response.json() as { central_url: string }).central_url, worker.central_url);
     }
     assert.equal((await fetch(`${url}/api/doctor?profile=test`)).status, 200);
+    // A worker has no dashboard; `gah diag export` reads its bundle locally.
+    const diagnostics = await fetch(`${url}/api/diagnostics/export`);
+    assert.equal(diagnostics.status, 200);
+    assert.equal(diagnostics.headers.get('content-type'), 'application/gzip');
     // Invalid dispatch reaches execution validation; it never starts a backend.
     assert.equal((await fetch(`${url}/api/dispatch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
     const probe = express();

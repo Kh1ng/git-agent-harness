@@ -143,6 +143,20 @@ export const loginRepairApi = {
   cancel: (id: string, key: string) => repairRequest<{ cancelled: boolean }>('DELETE', `/api/auth-health/repairs/${encodeURIComponent(id)}`, key)
 };
 
+export const diagnosticsApi = {
+  /** Gzipped JSON bundle: this server's memory timeline and host details. */
+  exportBundle: async (): Promise<{ blob: Blob; filename: string }> => {
+    const path = '/api/diagnostics/export';
+    const res = await fetch(new URL(path, SERVER_URL).toString(), { headers: authHeaders() });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => null) as { message?: unknown } | null;
+      throw new GahApiError(typeof payload?.message === 'string' ? payload.message : `${res.status} ${res.statusText}`, res.status, path);
+    }
+    const filename = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'parasaur-diagnostics.json.gz';
+    return { blob: await res.blob(), filename };
+  }
+};
+
 export const activityApi = {
   notificationPreferences: () => getJson<ActivityNotificationPreferences>('/api/activity/notification-preferences'),
   setNotificationPreferences: (preferences: ActivityNotificationPreferences) => postJson<ActivityNotificationPreferences, ActivityNotificationPreferences>('/api/activity/notification-preferences', preferences),

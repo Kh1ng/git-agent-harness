@@ -14,7 +14,7 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { ExternalAnchor } from '../components/ExternalAnchor.js';
 import { ThemePicker } from '../components/ThemePicker.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
-import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
+import { gahApi, backendInstancesApi, diagnosticsApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings, NodeResources } from '@git-agent-harness/contracts';
 import { NODE_CAPACITY_MIN_MIB, NODE_CAPACITY_DEFAULTS, NODE_CAPACITY_CPU_LIMITS } from '@git-agent-harness/contracts';
 import type { ManagerChatSettingsSummary, ManagerChatSettingsUpdate, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, ReleaseChannelStatus, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
@@ -36,6 +36,7 @@ const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keyw
   { heading: 'Telegram and Discord notifications', section: 'general', keywords: 'notifications alerts telegram discord channel' },
   { heading: 'Chat', section: 'general', keywords: 'manager chat backend model helper routing' },
   { heading: 'Update Parasaur', section: 'general', keywords: 'version upgrade release' },
+  { heading: 'Diagnostics', section: 'general', keywords: 'debug ram memory usage export bundle report bug' },
   { heading: 'Agent backends', section: 'general', keywords: 'providers eligibility availability quota' },
   { heading: 'Central skill bank', section: 'skills', keywords: 'skills versions' },
   { heading: 'TDAI memory gateway', section: 'memory', keywords: 'memory recall context policy credentials' },
@@ -210,6 +211,7 @@ export function SettingsPage() {
 
       <ManagerChatSettingsSection configuredProfiles={configuredProfiles} />
       <AdminUpdateSection />
+      <DiagnosticsSection />
       <section aria-labelledby="agent-availability-title">
         <h3 id="agent-availability-title" className="text-sm font-semibold text-primary mb-3">Agent backends {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
         <p className="text-sm text-secondary mb-3">Routing eligibility from the latest Quota snapshot.</p>
@@ -1434,6 +1436,41 @@ function GatewaySetupSection() {
  * status, tolerating the brief window where the server is down mid-restart,
  * then reloads the page once it's confirmed back up. Renders nothing when
  * the server has the feature disabled (GAH_ENABLE_ADMIN_UPDATE unset). */
+function DiagnosticsSection() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { blob, filename } = await diagnosticsApi.exportBundle();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="card-padded max-w-md" aria-labelledby="diagnostics-title">
+      <h3 id="diagnostics-title" className="text-sm font-semibold text-primary mb-1">Diagnostics</h3>
+      <p className="text-sm text-secondary mb-3">
+        Download this server's memory timeline (samples every 10 seconds, about the last 15 hours) with host and version details. Send the file to whoever is debugging. It lists process names but not their arguments.
+      </p>
+      <button type="button" className="btn-secondary" onClick={download} disabled={busy}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : null} Download diagnostics
+      </button>
+      <p className="text-xs text-muted mt-2">On a worker node with no dashboard, run <code>gah diag export</code> on that machine.</p>
+      {error && <p role="alert" className="text-sm text-critical mt-2">Could not download diagnostics: {error}</p>}
+    </section>
+  );
+}
+
 export function AdminUpdateSection() {
   const [enabled, setEnabled] = useState(true);
   const [pending, setPending] = useState<AdminUpdatePendingInfo | null>(null);
